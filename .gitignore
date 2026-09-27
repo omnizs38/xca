@@ -1,0 +1,4 @@
+/target/
+*.xca
+*.profraw
+.DS_Store
