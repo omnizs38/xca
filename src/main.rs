@@ -11,11 +11,20 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let program = args.first().map(String::as_str).unwrap_or("xca");
     match args.get(1).map(String::as_str) {
         Some("compress") if args.len() == 4 || args.len() == 5 => {
-            let level = args.get(4).map(|value| value.parse()).transpose()?.unwrap_or(6);
+            let level = args
+                .get(4)
+                .map(|value| value.parse())
+                .transpose()?
+                .unwrap_or(6);
             let input = fs::read(&args[2])?;
             let output = xca::compress_with_level(&input, level)?;
             fs::write(&args[3], &output)?;
-            eprintln!("{} -> {} bytes ({:.2}%)", input.len(), output.len(), ratio(input.len(), output.len()));
+            eprintln!(
+                "{} -> {} bytes ({:.2}%)",
+                input.len(),
+                output.len(),
+                ratio(input.len(), output.len())
+            );
         }
         Some("decompress") if args.len() == 4 => {
             let input = fs::read(&args[2])?;
@@ -47,7 +56,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
 }
 
 fn ratio(input: usize, output: usize) -> f64 {
-    if input == 0 { 0.0 } else { output as f64 * 100.0 / input as f64 }
+    if input == 0 {
+        0.0
+    } else {
+        output as f64 * 100.0 / input as f64
+    }
 }
 
 fn main() {

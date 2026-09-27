@@ -58,12 +58,23 @@ impl fmt::Display for Error {
             Self::Truncated => write!(f, "truncated XCA stream"),
             Self::BadMagic => write!(f, "invalid XCA magic"),
             Self::UnsupportedMethod(method) => write!(f, "unsupported XCA method {method}"),
-            Self::InvalidLevel(level) => write!(f, "compression level must be between 1 and 9, got {level}"),
+            Self::InvalidLevel(level) => {
+                write!(f, "compression level must be between 1 and 9, got {level}")
+            }
             Self::InvalidMatch => write!(f, "invalid LZ match"),
             Self::InvalidRun => write!(f, "invalid RLE payload"),
-            Self::LengthMismatch { expected, actual } => write!(f, "decoded length mismatch: expected {expected}, got {actual}"),
-            Self::ChecksumMismatch { expected, actual } => write!(f, "checksum mismatch: expected {expected:08x}, got {actual:08x}"),
-            Self::OutputLimitExceeded { requested, limit } => write!(f, "decoded size {requested} exceeds configured limit {limit}"),
+            Self::LengthMismatch { expected, actual } => write!(
+                f,
+                "decoded length mismatch: expected {expected}, got {actual}"
+            ),
+            Self::ChecksumMismatch { expected, actual } => write!(
+                f,
+                "checksum mismatch: expected {expected:08x}, got {actual:08x}"
+            ),
+            Self::OutputLimitExceeded { requested, limit } => write!(
+                f,
+                "decoded size {requested} exceeds configured limit {limit}"
+            ),
             Self::TrailingData => write!(f, "unexpected trailing data"),
             Self::InputTooLarge => write!(f, "input is too large for this platform or format"),
         }
@@ -169,7 +180,9 @@ fn parse_v2_header(input: &[u8]) -> Result<V2Header, Error> {
     }
     let original_size = usize_from_u64(read_u64(&input[8..16]))?;
     let payload_size = usize_from_u64(read_u64(&input[16..24]))?;
-    let expected_frame_size = V2_HEADER_LEN.checked_add(payload_size).ok_or(Error::InputTooLarge)?;
+    let expected_frame_size = V2_HEADER_LEN
+        .checked_add(payload_size)
+        .ok_or(Error::InputTooLarge)?;
     if input.len() < expected_frame_size {
         return Err(Error::Truncated);
     }
@@ -189,13 +202,19 @@ fn parse_v2_header(input: &[u8]) -> Result<V2Header, Error> {
 fn decode_v2(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
     let header = parse_v2_header(input)?;
     if header.original_size > limit {
-        return Err(Error::OutputLimitExceeded { requested: header.original_size, limit });
+        return Err(Error::OutputLimitExceeded {
+            requested: header.original_size,
+            limit,
+        });
     }
     let payload = &input[V2_HEADER_LEN..V2_HEADER_LEN + header.payload_size];
     let output = match header.method {
         METHOD_STORE => {
             if payload.len() != header.original_size {
-                return Err(Error::LengthMismatch { expected: header.original_size, actual: payload.len() });
+                return Err(Error::LengthMismatch {
+                    expected: header.original_size,
+                    actual: payload.len(),
+                });
             }
             payload.to_vec()
         }
@@ -205,7 +224,10 @@ fn decode_v2(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
     if header.flags & FLAG_CHECKSUM != 0 {
         let actual = crc32(&output);
         if actual != header.checksum {
-            return Err(Error::ChecksumMismatch { expected: header.checksum, actual });
+            return Err(Error::ChecksumMismatch {
+                expected: header.checksum,
+                actual,
+            });
         }
     }
     Ok(output)
@@ -217,7 +239,10 @@ fn decode_v1(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
     }
     let expected = usize_from_u64(read_u64(&input[5..13]))?;
     if expected > limit {
-        return Err(Error::OutputLimitExceeded { requested: expected, limit });
+        return Err(Error::OutputLimitExceeded {
+            requested: expected,
+            limit,
+        });
     }
     let payload = &input[V1_HEADER_LEN..];
     let output = match input[4] {
@@ -226,7 +251,10 @@ fn decode_v1(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
         method => return Err(Error::UnsupportedMethod(method)),
     };
     if output.len() != expected {
-        return Err(Error::LengthMismatch { expected, actual: output.len() });
+        return Err(Error::LengthMismatch {
+            expected,
+            actual: output.len(),
+        });
     }
     Ok(output)
 }
@@ -260,7 +288,13 @@ fn insert_position(input: &[u8], position: usize, head: &mut [usize], previous: 
     head[hash] = position;
 }
 
-fn find_match(input: &[u8], position: usize, head: &[usize], previous: &[usize], depth: usize) -> (usize, usize) {
+fn find_match(
+    input: &[u8],
+    position: usize,
+    head: &[usize],
+    previous: &[usize],
+    depth: usize,
+) -> (usize, usize) {
     if position + MIN_MATCH > input.len() {
         return (0, 0);
     }
@@ -345,7 +379,11 @@ fn decode_lz(payload: &[u8], expected: usize) -> Result<Vec<u8>, Error> {
                 let distance = u16::from_le_bytes([payload[cursor], payload[cursor + 1]]) as usize;
                 let length = payload[cursor + 2] as usize;
                 cursor += 3;
-                if distance == 0 || distance > output.len() || length < MIN_MATCH || output.len().saturating_add(length) > expected {
+                if distance == 0
+                    || distance > output.len()
+                    || length < MIN_MATCH
+                    || output.len().saturating_add(length) > expected
+                {
                     return Err(Error::InvalidMatch);
                 }
                 for _ in 0..length {
@@ -362,11 +400,11 @@ fn decode_lz(payload: &[u8], expected: usize) -> Result<Vec<u8>, Error> {
 }
 
 fn decode_rle(payload: &[u8], expected: usize) -> Result<Vec<u8>, Error> {
-    if payload.len() % 2 != 0 {
+    if !payload.len().is_multiple_of(2) {
         return Err(Error::InvalidRun);
     }
     let mut output = Vec::with_capacity(expected);
-    for pair in payload.chunks_exact(2) {
+    for pair in payload.as_chunks::<2>().0 {
         let count = pair[0] as usize;
         if count == 0 || output.len().saturating_add(count) > expected {
             return Err(Error::InvalidRun);
@@ -443,7 +481,10 @@ mod tests {
     #[test]
     fn enforces_output_limit() {
         let encoded = compress(&vec![0; 1024]);
-        assert!(matches!(decompress_with_limit(&encoded, 100), Err(Error::OutputLimitExceeded { .. })));
+        assert!(matches!(
+            decompress_with_limit(&encoded, 100),
+            Err(Error::OutputLimitExceeded { .. })
+        ));
     }
 
     #[test]
