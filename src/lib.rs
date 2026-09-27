@@ -107,7 +107,7 @@ fn decode_rle(payload: &[u8], expected: usize) -> Result<Vec<u8>, Error> {
         if count == 0 || out.len().saturating_add(count) > expected {
             return Err(Error::InvalidRun);
         }
-        out.extend(std::iter::repeat(pair[1]).take(count));
+        out.extend(std::iter::repeat_n(pair[1], count));
     }
     Ok(out)
 }

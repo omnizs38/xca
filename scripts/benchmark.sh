@@ -30,16 +30,25 @@ run() {
   printf '\n'
 }
 
+run_to_file() {
+  local name=$1
+  local output=$2
+  shift 2
+  printf '== %s ==\n' "$name"
+  /usr/bin/time -p "$@" > "$output"
+  printf '\n'
+}
+
 run 'XCA encode' "$xca" compress "$input" "$work/data.xca"
 run 'XCA decode' "$xca" decompress "$work/data.xca" "$work/data.xca.out"
 cmp "$input" "$work/data.xca.out"
 
-run 'LZMA encode' xz --format=lzma -9 -c "$input" > "$work/data.lzma"
-run 'LZMA decode' xz --format=lzma -d -c "$work/data.lzma" > "$work/data.lzma.out"
+run_to_file 'LZMA encode' "$work/data.lzma" xz --format=lzma -9 -c "$input"
+run_to_file 'LZMA decode' "$work/data.lzma.out" xz --format=lzma -d -c "$work/data.lzma"
 cmp "$input" "$work/data.lzma.out"
 
-run 'LZMA2 encode' xz -9 -c "$input" > "$work/data.xz"
-run 'LZMA2 decode' xz -d -c "$work/data.xz" > "$work/data.xz.out"
+run_to_file 'LZMA2 encode' "$work/data.xz" xz -9 -c "$input"
+run_to_file 'LZMA2 decode' "$work/data.xz.out" xz -d -c "$work/data.xz"
 cmp "$input" "$work/data.xz.out"
 
 run 'LZ4 encode' lz4 -q -f "$input" "$work/data.lz4"
