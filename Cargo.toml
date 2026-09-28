@@ -1,26 +1,22 @@
 [package]
 name = "xca"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2021"
 description = "Embeddable adaptive lossless compression library and CLI"
 license = "GPL-3.0-only"
 repository = "https://github.com/omnizs38/xca"
 keywords = ["compression", "lossless", "codec", "rust"]
 categories = ["compression", "command-line-utilities"]
-
 [lib]
 name = "xca"
 path = "src/lib.rs"
 crate-type = ["rlib", "staticlib", "cdylib"]
-
 [[bin]]
 name = "xca"
 path = "src/main.rs"
-
 [features]
 default = []
 c-api = []
-
 [profile.release]
 lto = "thin"
 codegen-units = 1
