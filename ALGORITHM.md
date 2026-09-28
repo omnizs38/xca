@@ -17,7 +17,7 @@ All choices are automatic and deterministic. There is no speed/ratio level param
 
 ## Long-range deduplication
 
-Exact repeated chunks become four-byte backward references. Hash collisions cannot corrupt output because candidate chunks are compared byte for byte. Every reference has independent size, direction, and CRC validation.
+Exact repeated chunks become four-byte backward references. Hash collisions cannot corrupt output because candidate chunks are compared byte for byte. Every reference has independent size and direction validation. Its checksum must equal the already validated target checksum, avoiding a redundant full-block CRC scan while preserving corruption detection.
 
 ## Split Pulse
 

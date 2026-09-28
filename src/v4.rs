@@ -325,11 +325,11 @@ pub fn decompress_slice(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
                     actual: end - start,
                 });
             }
-            let actual = crc32(&output[start..end]);
-            if actual != descriptor.checksum {
+            let target_checksum = descriptors[target].checksum;
+            if target_checksum != descriptor.checksum {
                 return Err(Error::ChecksumMismatch {
                     expected: descriptor.checksum,
-                    actual,
+                    actual: target_checksum,
                 });
             }
             let block_start = output.len();
@@ -623,6 +623,7 @@ pub fn decompress_stream<R: Read, W: Write>(
         ..Default::default()
     };
     let mut history = Vec::<Vec<u8>>::new();
+    let mut history_checksums = Vec::<u32>::new();
     loop {
         let mut h = [0; BH];
         exact(r, &mut h)?;
@@ -653,6 +654,7 @@ pub fn decompress_stream<R: Read, W: Write>(
         let mut p = vec![0; pn];
         exact(r, &mut p)?;
         st.input_bytes += pn as u64;
+        let mut reused_checksum = None;
         let mut data = match m {
             STORED if pred == NONE_P && p.len() == n => p,
             PULSE => decode(&p, n, false)?,
@@ -670,13 +672,14 @@ pub fn decompress_stream<R: Read, W: Write>(
                         actual: referenced.len(),
                     });
                 }
+                reused_checksum = Some(history_checksums[target]);
                 referenced.clone()
             }
             STORED => return Err(Error::InvalidMatch),
             x => return Err(Error::UnsupportedMethod(x)),
         };
         inverse(&mut data, pred)?;
-        let actual = crc32(&data);
+        let actual = reused_checksum.unwrap_or_else(|| crc32(&data));
         if actual != crc {
             return Err(Error::ChecksumMismatch {
                 expected: crc,
@@ -686,6 +689,7 @@ pub fn decompress_stream<R: Read, W: Write>(
         w.write_all(&data).map_err(ioe)?;
         if keeps_history {
             history.push(data);
+            history_checksums.push(crc);
         }
         st.output_bytes += n as u64;
         st.blocks = st.blocks.checked_add(1).ok_or(Error::InputTooLarge)?
@@ -1558,6 +1562,30 @@ mod tests {
             assert_ne!(method, END);
             cursor += packed;
             block += 1;
+        }
+    }
+
+    #[test]
+    fn reference_checksum_mismatch_is_rejected_without_rescanning() {
+        let base = b"reference checksum validation ".repeat(24_000);
+        let mut data = base.clone();
+        data.extend_from_slice(&base);
+        let mut archive = compress_slice(&data).unwrap();
+        let mut cursor = HEADER;
+        loop {
+            let method = archive[cursor];
+            let packed =
+                u32::from_le_bytes(archive[cursor + 6..cursor + 10].try_into().unwrap()) as usize;
+            if method == REFERENCE {
+                archive[cursor + 10] ^= 0x80;
+                assert!(matches!(
+                    decompress_slice(&archive, data.len()),
+                    Err(Error::ChecksumMismatch { .. })
+                ));
+                break;
+            }
+            assert_ne!(method, END);
+            cursor += BH + packed;
         }
     }
 }

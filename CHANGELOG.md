@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.11.1 — 2026-09-28
+
+- Reused the already validated target checksum for long-range reference blocks instead of rescanning identical bytes.
+- Removed the second full-memory pass from reference-heavy in-memory and streaming decompression.
+- Added a strict reference-checksum mismatch test, bringing the suite to 18 tests.
+- Improved local 16-copy decode throughput from roughly 372 MiB/s to 1,960 MiB/s without changing the XCA8 format or archive size.
+
 ## 0.11.0 — 2026-09-28
 
 - Introduced XCA8 with one unified adaptive compression profile.
