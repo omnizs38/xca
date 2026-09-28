@@ -1,12 +1,14 @@
-use crate::{crc32, Error, FrameInfo, Method};
+use crate::{crc32, huffman, Error, FrameInfo, Method};
 use std::io::{Read, Write};
 use std::thread;
-const MAGIC: &[u8; 4] = b"XCA4";
+const MAGIC_V4: &[u8; 4] = b"XCA4";
+const MAGIC_V5: &[u8; 4] = b"XCA5";
 const HEADER: usize = 12;
 const BH: usize = 14;
 const END: u8 = 255;
 const STORED: u8 = 0;
 const PULSE: u8 = 1;
+const PULSE_HUFFMAN: u8 = 2;
 const NONE_P: u8 = 0;
 const DELTA: u8 = 1;
 const XOR: u8 = 2;
@@ -116,7 +118,7 @@ pub fn compress_slice(input: &[u8], level: u8) -> Result<Vec<u8>, Error> {
     });
     let capacity = HEADER + BH + blocks.iter().map(|b| BH + b.payload.len()).sum::<usize>();
     let mut output = Vec::with_capacity(capacity);
-    output.extend_from_slice(MAGIC);
+    output.extend_from_slice(MAGIC_V5);
     output.extend_from_slice(&[level, 1, 0, 0]);
     output.extend_from_slice(&(options.block_size as u32).to_le_bytes());
     for block in blocks {
@@ -140,6 +142,10 @@ fn decode_block(block: BlockDescriptor<'_>) -> Result<Vec<u8>, Error> {
             block.payload.to_vec()
         }
         PULSE => decode(block.payload, block.original)?,
+        PULSE_HUFFMAN => {
+            let pulse = huffman::decode(block.payload)?;
+            decode(&pulse, block.original)?
+        }
         STORED => return Err(Error::InvalidMatch),
         value => return Err(Error::UnsupportedMethod(value)),
     };
@@ -154,7 +160,7 @@ fn decode_block(block: BlockDescriptor<'_>) -> Result<Vec<u8>, Error> {
     Ok(decoded)
 }
 pub fn decompress_slice(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
-    if input.len() < HEADER || &input[..4] != MAGIC {
+    if input.len() < HEADER || &input[..4] != MAGIC_V4 && &input[..4] != MAGIC_V5 {
         return Err(Error::BadMagic);
     }
     if !(1..=9).contains(&input[4]) {
@@ -256,12 +262,21 @@ fn encode_block(input: &[u8], level: u8, fast: &mut FastWorkspace) -> EncodedBlo
         let transformed = transform(input, predictor);
         encode(&transformed, level, fast)
     };
-    if packed.len() < input.len() {
+    let entropy = if level >= 4 {
+        huffman::encode(&packed)
+    } else {
+        None
+    };
+    let (method, payload) = match entropy {
+        Some(encoded) if encoded.len() < packed.len() => (PULSE_HUFFMAN, encoded),
+        _ => (PULSE, packed),
+    };
+    if payload.len() < input.len() {
         EncodedBlock {
-            method: PULSE,
+            method,
             predictor,
             original: input.len() as u32,
-            payload: packed,
+            payload,
             checksum: crc32(input),
         }
     } else {
@@ -297,7 +312,7 @@ pub fn compress_stream<R: Read, W: Write>(
     opt: CompressionOptions,
 ) -> Result<StreamStats, Error> {
     valid(opt)?;
-    w.write_all(MAGIC).map_err(ioe)?;
+    w.write_all(MAGIC_V5).map_err(ioe)?;
     w.write_all(&[opt.level, 1, 0, 0]).map_err(ioe)?;
     w.write_all(&(opt.block_size as u32).to_le_bytes())
         .map_err(ioe)?;
@@ -324,8 +339,17 @@ pub fn compress_stream<R: Read, W: Write>(
             let transformed = transform(input, pred);
             encode(&transformed, opt.level, &mut fast)
         };
-        let (m, p, sp) = if packed.len() < input.len() {
-            (PULSE, packed.as_slice(), pred)
+        let entropy = if opt.level >= 4 {
+            huffman::encode(&packed)
+        } else {
+            None
+        };
+        let (m, owned, sp) = match entropy {
+            Some(encoded) if encoded.len() < packed.len() => (PULSE_HUFFMAN, encoded, pred),
+            _ => (PULSE, packed, pred),
+        };
+        let (m, p, sp) = if owned.len() < input.len() {
+            (m, owned.as_slice(), sp)
         } else {
             (STORED, input, NONE_P)
         };
@@ -350,7 +374,7 @@ pub fn decompress_stream<R: Read, W: Write>(
 ) -> Result<StreamStats, Error> {
     let mut h = [0; HEADER];
     exact(r, &mut h)?;
-    if &h[..4] != MAGIC {
+    if &h[..4] != MAGIC_V4 && &h[..4] != MAGIC_V5 {
         return Err(Error::BadMagic);
     }
     if !(1..=9).contains(&h[4]) {
@@ -397,6 +421,10 @@ pub fn decompress_stream<R: Read, W: Write>(
         let mut data = match m {
             STORED if pred == NONE_P && p.len() == n => p,
             PULSE => decode(&p, n)?,
+            PULSE_HUFFMAN => {
+                let pulse = huffman::decode(&p)?;
+                decode(&pulse, n)?
+            }
             STORED => return Err(Error::InvalidMatch),
             x => return Err(Error::UnsupportedMethod(x)),
         };
@@ -415,7 +443,7 @@ pub fn decompress_stream<R: Read, W: Write>(
     Ok(st)
 }
 pub fn analyze_archive(input: &[u8]) -> Result<ArchiveAnalysis, Error> {
-    if input.len() < HEADER || &input[..4] != MAGIC {
+    if input.len() < HEADER || &input[..4] != MAGIC_V4 && &input[..4] != MAGIC_V5 {
         return Err(Error::BadMagic);
     }
     let mut result = ArchiveAnalysis {
@@ -455,9 +483,15 @@ pub fn analyze_archive(input: &[u8]) -> Result<ArchiveAnalysis, Error> {
             result.stored_blocks += 1;
             result.literal_commands += 1;
             result.literal_bytes += original as u64;
-        } else if method == PULSE {
+        } else if method == PULSE || method == PULSE_HUFFMAN {
             result.pulse_blocks += 1;
-            let payload = &input[cursor..end];
+            let decoded_entropy;
+            let payload = if method == PULSE_HUFFMAN {
+                decoded_entropy = huffman::decode(&input[cursor..end])?;
+                decoded_entropy.as_slice()
+            } else {
+                &input[cursor..end]
+            };
             let mut at = 0;
             let mut produced = 0usize;
             while produced < original {
@@ -506,7 +540,7 @@ pub fn analyze_archive(input: &[u8]) -> Result<ArchiveAnalysis, Error> {
     Ok(result)
 }
 pub fn frame_info(i: &[u8]) -> Result<FrameInfo, Error> {
-    if i.len() < HEADER || &i[..4] != MAGIC {
+    if i.len() < HEADER || &i[..4] != MAGIC_V4 && &i[..4] != MAGIC_V5 {
         return Err(Error::BadMagic);
     }
     let bs = u32::from_le_bytes(i[8..12].try_into().unwrap()) as usize;
@@ -525,7 +559,7 @@ pub fn frame_info(i: &[u8]) -> Result<FrameInfo, Error> {
                 return Err(Error::TrailingData);
             }
             return Ok(FrameInfo {
-                version: 4,
+                version: if &i[..4] == MAGIC_V5 { 5 } else { 4 },
                 method: Method::Adaptive,
                 level: i[4],
                 original_size: original,
@@ -537,7 +571,7 @@ pub fn frame_info(i: &[u8]) -> Result<FrameInfo, Error> {
         if n == 0 || n > bs || pn > n {
             return Err(Error::InvalidBlockSize(n));
         }
-        if !matches!(m, STORED | PULSE) || pred > XOR {
+        if !matches!(m, STORED | PULSE | PULSE_HUFFMAN) || pred > XOR {
             return Err(Error::UnsupportedMethod(m));
         }
         c = c.checked_add(pn).ok_or(Error::InputTooLarge)?;

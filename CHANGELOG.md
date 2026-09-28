@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.8.0 — 2026-09-28
+
+- Introduced the XCA5 format with adaptive per-block entropy coding.
+- Added an independent canonical Huffman backend for Pulse payloads.
+- Added a 12-bit first-level decode table with validated trie fallback.
+- Preserved the Turbo path for levels 1–3 and XCA4 decoding compatibility.
+- Added direct entropy round-trip and truncation tests.
+- Improved local level-5 archive size by about 13% relative to XCA 0.7.1 on the development corpus.
+
 ## 0.7.1 — 2026-09-28
 
 - Added `xca analyze <archive>` for token-level diagnostics.

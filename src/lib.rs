@@ -1,6 +1,7 @@
 //! XCA4: an independently implemented adaptive lossless compression codec.
 use std::fmt;
 mod codec;
+mod huffman;
 mod v4;
 pub(crate) use codec::crc32;
 pub use v4::{
@@ -36,6 +37,7 @@ pub enum Error {
     InvalidBlockSize(usize),
     Io(String),
     InvalidMatch,
+    InvalidEntropyData,
     InvalidRun,
     LengthMismatch { expected: usize, actual: usize },
     ChecksumMismatch { expected: u32, actual: u32 },
@@ -55,6 +57,7 @@ impl fmt::Display for Error {
             Self::InvalidBlockSize(v) => write!(f, "invalid XCA block size {v}"),
             Self::Io(v) => write!(f, "I/O error: {v}"),
             Self::InvalidMatch => write!(f, "invalid XCA dictionary match"),
+            Self::InvalidEntropyData => write!(f, "invalid XCA entropy stream"),
             Self::InvalidRun => write!(f, "invalid XCA run"),
             Self::LengthMismatch { expected, actual } => write!(
                 f,

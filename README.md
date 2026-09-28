@@ -1,28 +1,21 @@
 # XCA — eXtended Compression Algorithm
 
-XCA 0.7.1 uses the XCA4 Pulse format and is an independently implemented, dependency-free lossless compression library and CLI written in Rust.
+XCA 0.8.0 is an independently implemented, dependency-free lossless compression library and CLI written in Rust. It writes the XCA5 format and remains able to decode XCA4 archives.
 
-> XCA4 is a working experimental codec. It is not yet proven to beat LZ4 or LZMA universally; performance claims require reproducible corpus benchmarks.
+> XCA is an experimental codec. It is not claimed to beat LZ4, Zstandard, or LZMA2 on every workload; compare codecs on representative data with reproducible settings.
 
-## XCA 0.7.1 highlights
+## XCA 0.8.0 highlights
 
-- `xca analyze` reports literal/match coverage, predictor usage, match lengths, and distances;
-- parallel in-memory block decompression with deterministic output order;
-- built-in `xca bench` command for CPU-only compression and decompression measurements;
-- table-driven CRC-32 for substantially faster compression and decompression;
-- generation-stamped per-thread hash workspaces with no per-block table clearing;
-- allocation-free predictor scoring on sampled data;
-- zero-copy raw input path when no predictor is selected;
-- parallel in-memory block compression using all available CPU threads;
-- dedicated direct-hash Turbo path for levels 1–3;
-- faster overlap-copy decoding using geometric slice expansion;
-- Pulse literal-run, short-match, and long-match command stream;
-- matches up to 65,535 bytes instead of XCA3's 255-byte ceiling;
-- sampled predictor sketch chooses raw, delta, or XOR mode without fully compressing every candidate;
-- one dictionary pass per block, with sparse history updates at fast levels;
-- automatic stored fallback for incompressible blocks;
-- bounded-memory streaming over `Read` and `Write`;
-- block CRC-32 and strict malformed-stream validation;
+- new XCA5 adaptive entropy format;
+- new independent canonical Huffman backend for Pulse command streams;
+- per-block choice among stored, Pulse, and Pulse+Huffman representations;
+- 12-bit first-level Huffman decode table with validated trie fallback for long codes;
+- levels 1–3 retain the low-latency Turbo path; levels 4–9 may use entropy coding when it reduces size;
+- XCA4 backward decoding compatibility;
+- `xca analyze` token-level diagnostics and `xca bench` CPU-only measurements;
+- parallel in-memory block compression and decompression with deterministic ordering;
+- table-driven CRC-32, strict malformed-stream validation, and bounded output;
+- adaptive raw, wrapping-delta, and XOR predictors;
 - Rust API, C ABI, static library, dynamic library, CLI, tests, and CI;
 - no third-party runtime or compression dependencies.
 
@@ -60,11 +53,10 @@ On Windows, preview and remove generated benchmark artifacts with `powershell -E
 
 ## Current priorities
 
-1. reproducible benchmark corpus and comparisons with LZ4, LZMA2, and Zstandard;
-2. independent entropy backend for literal streams;
-3. generation-stamped hash tables and parallel block scheduling;
-4. fuzzing, compatibility vectors, and external format review;
-5. SIMD acceleration where profiling demonstrates value.
+1. split entropy streams and lower match-distance overhead;
+2. reproducible corpus comparisons with LZ4, LZMA2, and Zstandard;
+3. fuzzing, compatibility vectors, and external format review;
+4. SIMD acceleration where profiling demonstrates value.
 
 ## License
 
