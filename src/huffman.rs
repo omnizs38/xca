@@ -48,7 +48,12 @@ pub(crate) fn encode(input: &[u8]) -> Option<Vec<u8>> {
     Some(output)
 }
 
-pub(crate) fn decode(input: &[u8]) -> Result<Vec<u8>, Error> {
+#[cfg(test)]
+fn decode(input: &[u8]) -> Result<Vec<u8>, Error> {
+    decode_limited(input, usize::MAX)
+}
+
+pub(crate) fn decode_limited(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
     const TABLE_BITS: u8 = 12;
     const TABLE_SIZE: usize = 1 << TABLE_BITS;
     const INVALID: i32 = i32::MIN;
@@ -57,6 +62,12 @@ pub(crate) fn decode(input: &[u8]) -> Result<Vec<u8>, Error> {
         return Err(Error::InvalidEntropyData);
     }
     let expected = u32::from_le_bytes(input[..4].try_into().unwrap()) as usize;
+    if expected > limit {
+        return Err(Error::OutputLimitExceeded {
+            requested: expected,
+            limit,
+        });
+    }
     let lengths: [u8; SYMBOLS] = input[4..HEADER_SIZE].try_into().unwrap();
     let codes = canonical_codes(&lengths).ok_or(Error::InvalidEntropyData)?;
     let mut trie = vec![DecodeNode::default()];
@@ -301,5 +312,15 @@ mod tests {
         let mut encoded = encode(&input).unwrap();
         encoded.pop();
         assert!(decode(&encoded).is_err());
+    }
+
+    #[test]
+    fn enforces_decoded_size_limit_before_allocation() {
+        let input = vec![b'Q'; 8192];
+        let encoded = encode(&input).unwrap();
+        assert!(matches!(
+            super::decode_limited(&encoded, 1024),
+            Err(crate::Error::OutputLimitExceeded { .. })
+        ));
     }
 }

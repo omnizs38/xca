@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.0 — 2026-09-28
+
+- Introduced the XCA6 Split Pulse format.
+- Separated tags, literals, long lengths, and distances into independently coded streams.
+- Added a four-entry move-to-front distance cache and compact explicit-distance varints.
+- Added direct Split Pulse decoding and adaptive fallback to XCA5 entropy or raw Pulse.
+- Added strict bounds for entropy-decoded allocations and header flag validation.
+- Expanded the suite to 15 tests covering deterministic output, boundary sizes, truncation, corruption, and resource limits.
+- Added strict PowerShell runners for verified XCA/Zstandard/LZ4/LZMA2 comparisons with CSV, JSON, and environment metadata.
+- Improved local level-5 archive size by 10.7% relative to XCA 0.8.0 on the development corpus.
+
 ## 0.8.0 — 2026-09-28
 
 - Introduced the XCA5 format with adaptive per-block entropy coding.

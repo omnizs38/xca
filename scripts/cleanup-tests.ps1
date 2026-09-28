@@ -10,7 +10,8 @@ $patterns = @(
     "level-*.xca", "xca-corpus.tar", "corpus-level-*.xca",
     "large-corpus.tar", "large-level-*.xca", "large-restored.tar",
     "benchmark-corpus.tar", "benchmark-large.bin", "benchmark-level-*.xca", "benchmark-restored.tar", "bench-*.xca", "bench-*.zst", "bench-*.xz",
-    "bench-*.lz4", "large-xca-*.xca", "large-lz4.7z", "large-zstd-*.zst", "bench-*.7z", "test-zstd.zst", "test-lz4.7z"
+    "bench-*.lz4", "large-xca-*.xca", "large-lz4.7z", "large-zstd-*.zst", "bench-*.7z", "test-zstd.zst", "test-lz4.7z",
+    "xca08-*.xca", "xca08-restored.bin", "strict-benchmark-results.csv", "strict-benchmark-results.json", "strict-benchmark-results.metadata.json"
 )
 
 $files = Get-ChildItem -Path $patterns -File -ErrorAction SilentlyContinue |
@@ -30,4 +31,10 @@ if (-not $files) {
 
 if ($DeleteBuild) {
     cargo clean
+}
+
+$benchmarkDirectory = Join-Path $PSScriptRoot "..\.xca-benchmark"
+if (Test-Path -LiteralPath $benchmarkDirectory) {
+    Remove-Item -LiteralPath $benchmarkDirectory -Force -Recurse
+    Write-Host "Removed .xca-benchmark directory."
 }

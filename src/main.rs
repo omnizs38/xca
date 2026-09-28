@@ -56,6 +56,8 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("blocks: {}", a.blocks);
             println!("stored_blocks: {}", a.stored_blocks);
             println!("pulse_blocks: {}", a.pulse_blocks);
+            println!("split_pulse_blocks: {}", a.split_pulse_blocks);
+            println!("entropy_blocks: {}", a.entropy_blocks);
             println!("predictor_none_blocks: {}", a.predictor_none_blocks);
             println!("predictor_delta_blocks: {}", a.predictor_delta_blocks);
             println!("predictor_xor_blocks: {}", a.predictor_xor_blocks);

@@ -3,12 +3,14 @@ use std::io::{Read, Write};
 use std::thread;
 const MAGIC_V4: &[u8; 4] = b"XCA4";
 const MAGIC_V5: &[u8; 4] = b"XCA5";
+const MAGIC_V6: &[u8; 4] = b"XCA6";
 const HEADER: usize = 12;
 const BH: usize = 14;
 const END: u8 = 255;
 const STORED: u8 = 0;
 const PULSE: u8 = 1;
 const PULSE_HUFFMAN: u8 = 2;
+const PULSE_SPLIT: u8 = 3;
 const NONE_P: u8 = 0;
 const DELTA: u8 = 1;
 const XOR: u8 = 2;
@@ -46,6 +48,8 @@ pub struct ArchiveAnalysis {
     pub blocks: u32,
     pub stored_blocks: u32,
     pub pulse_blocks: u32,
+    pub split_pulse_blocks: u32,
+    pub entropy_blocks: u32,
     pub predictor_none_blocks: u32,
     pub predictor_delta_blocks: u32,
     pub predictor_xor_blocks: u32,
@@ -84,6 +88,63 @@ impl FastWorkspace {
         self.stamps[hash] = self.generation;
     }
 }
+
+#[derive(Default)]
+struct DistanceCache {
+    values: [usize; 4],
+    len: usize,
+}
+impl DistanceCache {
+    fn promote(&mut self, distance: usize) {
+        let existing = self.values[..self.len]
+            .iter()
+            .position(|&value| value == distance);
+        let stop = existing.unwrap_or(self.len.min(3));
+        for index in (1..=stop).rev() {
+            self.values[index] = self.values[index - 1];
+        }
+        self.values[0] = distance;
+        if existing.is_none() {
+            self.len = (self.len + 1).min(4);
+        }
+    }
+
+    fn encode(&mut self, output: &mut Vec<u8>, distance: usize) {
+        if let Some(index) = self.values[..self.len]
+            .iter()
+            .position(|&value| value == distance)
+        {
+            output.push(index as u8);
+            self.promote(distance);
+        } else {
+            put_var(output, (distance as u32) + 4);
+            self.promote(distance);
+        }
+    }
+
+    fn decode(&mut self, input: &[u8], position: &mut usize) -> Result<usize, Error> {
+        let first = *input.get(*position).ok_or(Error::Truncated)?;
+        *position += 1;
+        let distance = if first <= 3 {
+            let index = first as usize;
+            if index >= self.len {
+                return Err(Error::InvalidMatch);
+            }
+            self.values[index]
+        } else {
+            let encoded = get_var_first(input, position, first)?;
+            if encoded < 5 {
+                return Err(Error::InvalidMatch);
+            }
+            encoded as usize - 4
+        };
+        if distance == 0 || distance > MAX_D {
+            return Err(Error::InvalidMatch);
+        }
+        self.promote(distance);
+        Ok(distance)
+    }
+}
 pub fn compress_slice(input: &[u8], level: u8) -> Result<Vec<u8>, Error> {
     let options = CompressionOptions {
         level,
@@ -118,7 +179,7 @@ pub fn compress_slice(input: &[u8], level: u8) -> Result<Vec<u8>, Error> {
     });
     let capacity = HEADER + BH + blocks.iter().map(|b| BH + b.payload.len()).sum::<usize>();
     let mut output = Vec::with_capacity(capacity);
-    output.extend_from_slice(MAGIC_V5);
+    output.extend_from_slice(MAGIC_V6);
     output.extend_from_slice(&[level, 1, 0, 0]);
     output.extend_from_slice(&(options.block_size as u32).to_le_bytes());
     for block in blocks {
@@ -141,11 +202,12 @@ fn decode_block(block: BlockDescriptor<'_>) -> Result<Vec<u8>, Error> {
         STORED if block.predictor == NONE_P && block.payload.len() == block.original => {
             block.payload.to_vec()
         }
-        PULSE => decode(block.payload, block.original)?,
+        PULSE => decode(block.payload, block.original, false)?,
         PULSE_HUFFMAN => {
-            let pulse = huffman::decode(block.payload)?;
-            decode(&pulse, block.original)?
+            let pulse = huffman::decode_limited(block.payload, pulse_limit(block.original))?;
+            decode(&pulse, block.original, false)?
         }
+        PULSE_SPLIT => split_decode(block.payload, block.original)?,
         STORED => return Err(Error::InvalidMatch),
         value => return Err(Error::UnsupportedMethod(value)),
     };
@@ -160,11 +222,16 @@ fn decode_block(block: BlockDescriptor<'_>) -> Result<Vec<u8>, Error> {
     Ok(decoded)
 }
 pub fn decompress_slice(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
-    if input.len() < HEADER || &input[..4] != MAGIC_V4 && &input[..4] != MAGIC_V5 {
+    if input.len() < HEADER
+        || &input[..4] != MAGIC_V4 && &input[..4] != MAGIC_V5 && &input[..4] != MAGIC_V6
+    {
         return Err(Error::BadMagic);
     }
     if !(1..=9).contains(&input[4]) {
         return Err(Error::InvalidLevel(input[4]));
+    }
+    if input[5] != 1 || input[6] != 0 || input[7] != 0 {
+        return Err(Error::InvalidEntropyData);
     }
     let block_size = u32::from_le_bytes(input[8..12].try_into().unwrap()) as usize;
     if !(MIN_BLOCK..=MAX_BLOCK).contains(&block_size) {
@@ -262,13 +329,15 @@ fn encode_block(input: &[u8], level: u8, fast: &mut FastWorkspace) -> EncodedBlo
         let transformed = transform(input, predictor);
         encode(&transformed, level, fast)
     };
-    let entropy = if level >= 4 {
-        huffman::encode(&packed)
-    } else {
-        None
-    };
-    let (method, payload) = match entropy {
-        Some(encoded) if encoded.len() < packed.len() => (PULSE_HUFFMAN, encoded),
+    let split = (level >= 4)
+        .then(|| split_encode(&packed, input.len()))
+        .flatten();
+    let (method, payload) = match split {
+        Some(encoded) if encoded.len() < packed.len() => (PULSE_SPLIT, encoded),
+        _ if level >= 4 => match huffman::encode(&packed) {
+            Some(encoded) if encoded.len() < packed.len() => (PULSE_HUFFMAN, encoded),
+            _ => (PULSE, packed),
+        },
         _ => (PULSE, packed),
     };
     if payload.len() < input.len() {
@@ -312,7 +381,7 @@ pub fn compress_stream<R: Read, W: Write>(
     opt: CompressionOptions,
 ) -> Result<StreamStats, Error> {
     valid(opt)?;
-    w.write_all(MAGIC_V5).map_err(ioe)?;
+    w.write_all(MAGIC_V6).map_err(ioe)?;
     w.write_all(&[opt.level, 1, 0, 0]).map_err(ioe)?;
     w.write_all(&(opt.block_size as u32).to_le_bytes())
         .map_err(ioe)?;
@@ -339,15 +408,20 @@ pub fn compress_stream<R: Read, W: Write>(
             let transformed = transform(input, pred);
             encode(&transformed, opt.level, &mut fast)
         };
-        let entropy = if opt.level >= 4 {
-            huffman::encode(&packed)
+        let split = if opt.level >= 4 {
+            split_encode(&packed, input.len())
         } else {
             None
         };
-        let (m, owned, sp) = match entropy {
-            Some(encoded) if encoded.len() < packed.len() => (PULSE_HUFFMAN, encoded, pred),
-            _ => (PULSE, packed, pred),
+        let (m, owned) = match split {
+            Some(encoded) if encoded.len() < packed.len() => (PULSE_SPLIT, encoded),
+            _ if opt.level >= 4 => match huffman::encode(&packed) {
+                Some(encoded) if encoded.len() < packed.len() => (PULSE_HUFFMAN, encoded),
+                _ => (PULSE, packed),
+            },
+            _ => (PULSE, packed),
         };
+        let sp = pred;
         let (m, p, sp) = if owned.len() < input.len() {
             (m, owned.as_slice(), sp)
         } else {
@@ -374,11 +448,14 @@ pub fn decompress_stream<R: Read, W: Write>(
 ) -> Result<StreamStats, Error> {
     let mut h = [0; HEADER];
     exact(r, &mut h)?;
-    if &h[..4] != MAGIC_V4 && &h[..4] != MAGIC_V5 {
+    if &h[..4] != MAGIC_V4 && &h[..4] != MAGIC_V5 && &h[..4] != MAGIC_V6 {
         return Err(Error::BadMagic);
     }
     if !(1..=9).contains(&h[4]) {
         return Err(Error::InvalidLevel(h[4]));
+    }
+    if h[5] != 1 || h[6] != 0 || h[7] != 0 {
+        return Err(Error::InvalidEntropyData);
     }
     let bs = u32::from_le_bytes(h[8..12].try_into().unwrap()) as usize;
     if !(MIN_BLOCK..=MAX_BLOCK).contains(&bs) {
@@ -420,11 +497,12 @@ pub fn decompress_stream<R: Read, W: Write>(
         st.input_bytes += pn as u64;
         let mut data = match m {
             STORED if pred == NONE_P && p.len() == n => p,
-            PULSE => decode(&p, n)?,
+            PULSE => decode(&p, n, false)?,
             PULSE_HUFFMAN => {
-                let pulse = huffman::decode(&p)?;
-                decode(&pulse, n)?
+                let pulse = huffman::decode_limited(&p, pulse_limit(n))?;
+                decode(&pulse, n, false)?
             }
+            PULSE_SPLIT => split_decode(&p, n)?,
             STORED => return Err(Error::InvalidMatch),
             x => return Err(Error::UnsupportedMethod(x)),
         };
@@ -443,8 +521,16 @@ pub fn decompress_stream<R: Read, W: Write>(
     Ok(st)
 }
 pub fn analyze_archive(input: &[u8]) -> Result<ArchiveAnalysis, Error> {
-    if input.len() < HEADER || &input[..4] != MAGIC_V4 && &input[..4] != MAGIC_V5 {
+    if input.len() < HEADER
+        || &input[..4] != MAGIC_V4 && &input[..4] != MAGIC_V5 && &input[..4] != MAGIC_V6
+    {
         return Err(Error::BadMagic);
+    }
+    if !(1..=9).contains(&input[4]) {
+        return Err(Error::InvalidLevel(input[4]));
+    }
+    if input[5] != 1 || input[6] != 0 || input[7] != 0 {
+        return Err(Error::InvalidEntropyData);
     }
     let mut result = ArchiveAnalysis {
         archive_bytes: input.len() as u64,
@@ -483,12 +569,23 @@ pub fn analyze_archive(input: &[u8]) -> Result<ArchiveAnalysis, Error> {
             result.stored_blocks += 1;
             result.literal_commands += 1;
             result.literal_bytes += original as u64;
-        } else if method == PULSE || method == PULSE_HUFFMAN {
+        } else if matches!(method, PULSE | PULSE_HUFFMAN | PULSE_SPLIT) {
             result.pulse_blocks += 1;
+            if method == PULSE_SPLIT {
+                result.split_pulse_blocks += 1;
+            }
+            if matches!(method, PULSE_HUFFMAN | PULSE_SPLIT) {
+                result.entropy_blocks += 1;
+            }
             let decoded_entropy;
+            let decoded_split;
             let payload = if method == PULSE_HUFFMAN {
-                decoded_entropy = huffman::decode(&input[cursor..end])?;
+                decoded_entropy =
+                    huffman::decode_limited(&input[cursor..end], pulse_limit(original))?;
                 decoded_entropy.as_slice()
+            } else if method == PULSE_SPLIT {
+                decoded_split = split_expand(&input[cursor..end], original)?;
+                decoded_split.as_slice()
             } else {
                 &input[cursor..end]
             };
@@ -516,7 +613,10 @@ pub fn analyze_archive(input: &[u8]) -> Result<ArchiveAnalysis, Error> {
                     } else {
                         return Err(Error::InvalidMatch);
                     };
-                    if at + 2 > payload.len() || produced + length > original {
+                    if produced + length > original {
+                        return Err(Error::InvalidMatch);
+                    }
+                    if at + 2 > payload.len() {
                         return Err(Error::InvalidMatch);
                     }
                     let distance = u16::from_le_bytes([payload[at], payload[at + 1]]) as usize;
@@ -540,8 +640,14 @@ pub fn analyze_archive(input: &[u8]) -> Result<ArchiveAnalysis, Error> {
     Ok(result)
 }
 pub fn frame_info(i: &[u8]) -> Result<FrameInfo, Error> {
-    if i.len() < HEADER || &i[..4] != MAGIC_V4 && &i[..4] != MAGIC_V5 {
+    if i.len() < HEADER || &i[..4] != MAGIC_V4 && &i[..4] != MAGIC_V5 && &i[..4] != MAGIC_V6 {
         return Err(Error::BadMagic);
+    }
+    if !(1..=9).contains(&i[4]) {
+        return Err(Error::InvalidLevel(i[4]));
+    }
+    if i[5] != 1 || i[6] != 0 || i[7] != 0 {
+        return Err(Error::InvalidEntropyData);
     }
     let bs = u32::from_le_bytes(i[8..12].try_into().unwrap()) as usize;
     if !(MIN_BLOCK..=MAX_BLOCK).contains(&bs) {
@@ -559,7 +665,13 @@ pub fn frame_info(i: &[u8]) -> Result<FrameInfo, Error> {
                 return Err(Error::TrailingData);
             }
             return Ok(FrameInfo {
-                version: if &i[..4] == MAGIC_V5 { 5 } else { 4 },
+                version: if &i[..4] == MAGIC_V6 {
+                    6
+                } else if &i[..4] == MAGIC_V5 {
+                    5
+                } else {
+                    4
+                },
                 method: Method::Adaptive,
                 level: i[4],
                 original_size: original,
@@ -571,7 +683,7 @@ pub fn frame_info(i: &[u8]) -> Result<FrameInfo, Error> {
         if n == 0 || n > bs || pn > n {
             return Err(Error::InvalidBlockSize(n));
         }
-        if !matches!(m, STORED | PULSE | PULSE_HUFFMAN) || pred > XOR {
+        if !matches!(m, STORED | PULSE | PULSE_HUFFMAN | PULSE_SPLIT) || pred > XOR {
             return Err(Error::UnsupportedMethod(m));
         }
         c = c.checked_add(pn).ok_or(Error::InputTooLarge)?;
@@ -830,7 +942,7 @@ fn match_token(o: &mut Vec<u8>, d: usize, l: usize) {
     }
     o.extend_from_slice(&(d as u16).to_le_bytes())
 }
-fn decode(i: &[u8], expected: usize) -> Result<Vec<u8>, Error> {
+fn decode(i: &[u8], expected: usize, _pulse_v2: bool) -> Result<Vec<u8>, Error> {
     let mut o = Vec::with_capacity(expected);
     let mut p = 0;
     while o.len() < expected {
@@ -851,7 +963,10 @@ fn decode(i: &[u8], expected: usize) -> Result<Vec<u8>, Error> {
             } else {
                 return Err(Error::InvalidMatch);
             };
-            if l < MIN_M || p + 2 > i.len() {
+            if l < MIN_M {
+                return Err(Error::InvalidMatch);
+            }
+            if p + 2 > i.len() {
                 return Err(Error::InvalidMatch);
             }
             let d = u16::from_le_bytes([i[p], i[p + 1]]) as usize;
@@ -873,6 +988,226 @@ fn decode(i: &[u8], expected: usize) -> Result<Vec<u8>, Error> {
     }
     Ok(o)
 }
+fn split_encode(pulse: &[u8], expected: usize) -> Option<Vec<u8>> {
+    let mut tags = Vec::new();
+    let mut literals_stream = Vec::new();
+    let mut lengths = Vec::new();
+    let mut distances_stream = Vec::new();
+    let mut cache = DistanceCache::default();
+    let mut position = 0usize;
+    let mut produced = 0usize;
+    while produced < expected {
+        let tag = *pulse.get(position)?;
+        position += 1;
+        tags.push(tag);
+        if tag < 0x80 {
+            let length = tag as usize + 1;
+            let end = position.checked_add(length)?;
+            if end > pulse.len() || produced.checked_add(length)? > expected {
+                return None;
+            }
+            literals_stream.extend_from_slice(&pulse[position..end]);
+            position = end;
+            produced += length;
+        } else {
+            let length = if tag < 0xc0 {
+                (tag as usize & 0x3f) + 4
+            } else if tag == 0xc0 {
+                let start = position;
+                let value = get_var(pulse, &mut position).ok()? as usize;
+                lengths.extend_from_slice(&pulse[start..position]);
+                value
+            } else {
+                return None;
+            };
+            if length < MIN_M
+                || produced.checked_add(length)? > expected
+                || position + 2 > pulse.len()
+            {
+                return None;
+            }
+            let distance = u16::from_le_bytes([pulse[position], pulse[position + 1]]) as usize;
+            position += 2;
+            if distance == 0 || distance > produced {
+                return None;
+            }
+            cache.encode(&mut distances_stream, distance);
+            produced += length;
+        }
+    }
+    if position != pulse.len() {
+        return None;
+    }
+    let mut output = Vec::new();
+    output.extend_from_slice(b"SPL1");
+    append_split_stream(&mut output, &tags);
+    append_split_stream(&mut output, &literals_stream);
+    append_split_stream(&mut output, &lengths);
+    append_split_stream(&mut output, &distances_stream);
+    Some(output)
+}
+fn append_split_stream(output: &mut Vec<u8>, stream: &[u8]) {
+    if let Some(data) = huffman::encode(stream) {
+        if data.len() < stream.len() {
+            output.push(1);
+            output.extend_from_slice(&(data.len() as u32).to_le_bytes());
+            output.extend_from_slice(&data);
+            return;
+        }
+    }
+    output.push(0);
+    output.extend_from_slice(&(stream.len() as u32).to_le_bytes());
+    output.extend_from_slice(stream);
+}
+fn split_expand(input: &[u8], expected: usize) -> Result<Vec<u8>, Error> {
+    if input.len() < 4 || &input[..4] != b"SPL1" {
+        return Err(Error::InvalidEntropyData);
+    }
+    let mut position = 4usize;
+    let tags = read_split_stream(input, &mut position, expected)?;
+    let literals_stream = read_split_stream(input, &mut position, expected)?;
+    let lengths = read_split_stream(input, &mut position, expected)?;
+    let distances_stream = read_split_stream(input, &mut position, expected)?;
+    if position != input.len() {
+        return Err(Error::TrailingData);
+    }
+
+    let mut pulse = Vec::new();
+    let mut tag_position = 0usize;
+    let mut literal_position = 0usize;
+    let mut length_position = 0usize;
+    let mut distance_position = 0usize;
+    let mut produced = 0usize;
+    let mut cache = DistanceCache::default();
+    while produced < expected {
+        let tag = *tags.get(tag_position).ok_or(Error::Truncated)?;
+        tag_position += 1;
+        pulse.push(tag);
+        if tag < 0x80 {
+            let length = tag as usize + 1;
+            let end = literal_position
+                .checked_add(length)
+                .ok_or(Error::InputTooLarge)?;
+            if end > literals_stream.len() || produced.saturating_add(length) > expected {
+                return Err(Error::Truncated);
+            }
+            pulse.extend_from_slice(&literals_stream[literal_position..end]);
+            literal_position = end;
+            produced += length;
+        } else {
+            let length = if tag < 0xc0 {
+                (tag as usize & 0x3f) + 4
+            } else if tag == 0xc0 {
+                let start = length_position;
+                let value = get_var(&lengths, &mut length_position)? as usize;
+                pulse.extend_from_slice(&lengths[start..length_position]);
+                value
+            } else {
+                return Err(Error::InvalidMatch);
+            };
+            let distance = cache.decode(&distances_stream, &mut distance_position)?;
+            pulse.extend_from_slice(&(distance as u16).to_le_bytes());
+            if length < MIN_M || distance > produced || produced.saturating_add(length) > expected {
+                return Err(Error::InvalidMatch);
+            }
+            produced += length;
+        }
+    }
+    if tag_position != tags.len()
+        || literal_position != literals_stream.len()
+        || length_position != lengths.len()
+        || distance_position != distances_stream.len()
+    {
+        return Err(Error::TrailingData);
+    }
+    Ok(pulse)
+}
+fn split_decode(input: &[u8], expected: usize) -> Result<Vec<u8>, Error> {
+    if input.len() < 4 || &input[..4] != b"SPL1" {
+        return Err(Error::InvalidEntropyData);
+    }
+    let mut position = 4usize;
+    let tags = read_split_stream(input, &mut position, expected)?;
+    let literals_stream = read_split_stream(input, &mut position, expected)?;
+    let lengths = read_split_stream(input, &mut position, expected)?;
+    let distances_stream = read_split_stream(input, &mut position, expected)?;
+    if position != input.len() {
+        return Err(Error::TrailingData);
+    }
+
+    let mut output = Vec::with_capacity(expected);
+    let mut tag_position = 0usize;
+    let mut literal_position = 0usize;
+    let mut length_position = 0usize;
+    let mut distance_position = 0usize;
+    let mut cache = DistanceCache::default();
+    while output.len() < expected {
+        let tag = *tags.get(tag_position).ok_or(Error::Truncated)?;
+        tag_position += 1;
+        if tag < 0x80 {
+            let length = tag as usize + 1;
+            let end = literal_position
+                .checked_add(length)
+                .ok_or(Error::InputTooLarge)?;
+            if end > literals_stream.len() || output.len().saturating_add(length) > expected {
+                return Err(Error::Truncated);
+            }
+            output.extend_from_slice(&literals_stream[literal_position..end]);
+            literal_position = end;
+        } else {
+            let length = if tag < 0xc0 {
+                (tag as usize & 0x3f) + 4
+            } else if tag == 0xc0 {
+                get_var(&lengths, &mut length_position)? as usize
+            } else {
+                return Err(Error::InvalidMatch);
+            };
+            let distance = cache.decode(&distances_stream, &mut distance_position)?;
+            if length < MIN_M
+                || distance > output.len()
+                || output.len().saturating_add(length) > expected
+            {
+                return Err(Error::InvalidMatch);
+            }
+            let mut remaining = length;
+            while remaining > 0 {
+                let chunk = remaining.min(distance);
+                let start = output.len() - distance;
+                output.extend_from_within(start..start + chunk);
+                remaining -= chunk;
+            }
+        }
+    }
+    if tag_position != tags.len()
+        || literal_position != literals_stream.len()
+        || length_position != lengths.len()
+        || distance_position != distances_stream.len()
+    {
+        return Err(Error::TrailingData);
+    }
+    Ok(output)
+}
+fn read_split_stream(input: &[u8], position: &mut usize, limit: usize) -> Result<Vec<u8>, Error> {
+    let method = *input.get(*position).ok_or(Error::Truncated)?;
+    *position += 1;
+    let end_header = position.checked_add(4).ok_or(Error::InputTooLarge)?;
+    let size_bytes = input.get(*position..end_header).ok_or(Error::Truncated)?;
+    let size = u32::from_le_bytes(size_bytes.try_into().unwrap()) as usize;
+    *position = end_header;
+    let end = position.checked_add(size).ok_or(Error::InputTooLarge)?;
+    let payload = input.get(*position..end).ok_or(Error::Truncated)?;
+    *position = end;
+    match method {
+        0 => Ok(payload.to_vec()),
+        1 => huffman::decode_limited(payload, limit),
+        _ => Err(Error::InvalidEntropyData),
+    }
+}
+fn pulse_limit(expected: usize) -> usize {
+    expected
+        .saturating_add(expected.div_ceil(128))
+        .saturating_add(1024)
+}
 fn put_var(o: &mut Vec<u8>, mut v: u32) {
     while v >= 0x80 {
         o.push((v as u8) | 0x80);
@@ -893,6 +1228,25 @@ fn get_var(i: &[u8], p: &mut usize) -> Result<u32, Error> {
             return Ok(v);
         }
         shift += 7
+    }
+}
+fn get_var_first(i: &[u8], p: &mut usize, first: u8) -> Result<u32, Error> {
+    let mut value = (first & 0x7f) as u32;
+    if first & 0x80 == 0 {
+        return Ok(value);
+    }
+    let mut shift = 7;
+    loop {
+        let byte = *i.get(*p).ok_or(Error::Truncated)?;
+        *p += 1;
+        if shift >= 32 {
+            return Err(Error::InvalidMatch);
+        }
+        value |= ((byte & 0x7f) as u32) << shift;
+        if byte & 0x80 == 0 {
+            return Ok(value);
+        }
+        shift += 7;
     }
 }
 fn valid(o: CompressionOptions) -> Result<(), Error> {
@@ -951,5 +1305,84 @@ mod tests {
         let d: Vec<u8> = (0..8192).map(|i| i as u8).collect();
         let e = compress_slice(&d, 5).unwrap();
         assert_eq!(e[HEADER + 1], DELTA)
+    }
+
+    #[test]
+    fn strict_deterministic_round_trip_matrix() {
+        let sizes = [
+            0usize, 1, 3, 4, 31, 127, 128, 129, 4095, 4096, 65_535, 65_536,
+        ];
+        let mut state = 0x9e37_79b9_7f4a_7c15u64;
+        for size in sizes {
+            let mut data = vec![0u8; size];
+            for byte in &mut data {
+                state ^= state << 13;
+                state ^= state >> 7;
+                state ^= state << 17;
+                *byte = (state >> 24) as u8;
+            }
+            for level in 1..=9 {
+                let first = compress_slice(&data, level).unwrap();
+                let second = compress_slice(&data, level).unwrap();
+                assert_eq!(first, second, "non-deterministic output at level {level}");
+                assert_eq!(
+                    decompress_slice(&first, data.len()).unwrap(),
+                    data,
+                    "round-trip failure for {size} bytes at level {level}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn every_truncated_prefix_is_rejected() {
+        let data = b"strict truncation vector ".repeat(2048);
+        let archive = compress_slice(&data, 6).unwrap();
+        for end in 0..archive.len() {
+            assert!(
+                decompress_slice(&archive[..end], data.len()).is_err(),
+                "accepted truncated prefix ending at {end}"
+            );
+        }
+    }
+
+    #[test]
+    fn payload_corruption_is_rejected() {
+        let data: Vec<u8> = (0..200_000)
+            .map(|index| ((index * 17 + index / 97) & 0xff) as u8)
+            .collect();
+        let archive = compress_slice(&data, 6).unwrap();
+        let payload_start = HEADER + BH;
+        let payload_end = archive.len() - BH;
+        for position in (payload_start..payload_end.saturating_sub(1)).step_by(31) {
+            let mut damaged = archive.clone();
+            damaged[position] ^= 0x80;
+            assert!(
+                decompress_slice(&damaged, data.len()).is_err(),
+                "accepted corruption at byte {position}"
+            );
+        }
+    }
+
+    #[test]
+    fn split_pulse_is_selected_and_validated() {
+        let mut data = Vec::new();
+        for index in 0..20_000 {
+            data.extend_from_slice(
+                format!(
+                    "{{\"id\":{index},\"level\":\"INFO\",\"value\":{}}}\n",
+                    index % 97
+                )
+                .as_bytes(),
+            );
+        }
+        let archive = compress_slice(&data, 6).unwrap();
+        assert_eq!(&archive[..4], MAGIC_V6);
+        assert_eq!(archive[HEADER], PULSE_SPLIT);
+        assert_eq!(decompress_slice(&archive, data.len()).unwrap(), data);
+
+        let mut damaged = archive;
+        damaged[HEADER + BH] ^= 1;
+        assert!(decompress_slice(&damaged, data.len()).is_err());
     }
 }

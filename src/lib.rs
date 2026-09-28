@@ -1,4 +1,4 @@
-//! XCA4: an independently implemented adaptive lossless compression codec.
+//! XCA6: an independently implemented adaptive lossless compression codec.
 use std::fmt;
 mod codec;
 mod huffman;
