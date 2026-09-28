@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.6.0 — 2026-09-28
+
+- Replaced bit-at-a-time CRC-32 with a compile-time table-driven implementation.
+- Added reusable generation-stamped hash workspaces for Turbo workers.
+- Removed predictor sample allocations and raw-input copies.
+- Preserved encoded sizes and the XCA4 on-disk format.
+- Improved local large-corpus level-1 compression by 28%, level-5 compression by 10%, and decompression by roughly 35%.
+- Retained strict Clippy and all correctness tests.
+
 ## 0.5.0 — 2026-09-28
 
 - Added parallel in-memory block compression with deterministic output ordering.

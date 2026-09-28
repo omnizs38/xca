@@ -37,6 +37,34 @@ pub struct StreamStats {
     pub output_bytes: u64,
     pub blocks: u32,
 }
+struct FastWorkspace {
+    positions: Vec<u32>,
+    stamps: Vec<u32>,
+    generation: u32,
+}
+impl FastWorkspace {
+    fn new() -> Self {
+        Self {
+            positions: vec![0; HS],
+            stamps: vec![0; HS],
+            generation: 0,
+        }
+    }
+    fn begin_block(&mut self) {
+        self.generation = self.generation.wrapping_add(1);
+        if self.generation == 0 {
+            self.stamps.fill(0);
+            self.generation = 1;
+        }
+    }
+    fn get(&self, hash: usize) -> Option<usize> {
+        (self.stamps[hash] == self.generation).then_some(self.positions[hash] as usize)
+    }
+    fn set(&mut self, hash: usize, position: usize) {
+        self.positions[hash] = position as u32;
+        self.stamps[hash] = self.generation;
+    }
+}
 pub fn compress_slice(input: &[u8], level: u8) -> Result<Vec<u8>, Error> {
     let options = CompressionOptions {
         level,
@@ -52,10 +80,11 @@ pub fn compress_slice(input: &[u8], level: u8) -> Result<Vec<u8>, Error> {
         for worker in 0..workers {
             handles.push(scope.spawn(move || {
                 let mut local = Vec::new();
+                let mut fast = FastWorkspace::new();
                 for index in (worker..count).step_by(workers) {
                     let start = index * options.block_size;
                     let end = (start + options.block_size).min(input.len());
-                    local.push((index, encode_block(&input[start..end], level)));
+                    local.push((index, encode_block(&input[start..end], level, &mut fast)));
                 }
                 local
             }));
@@ -96,10 +125,14 @@ struct EncodedBlock {
     payload: Vec<u8>,
     checksum: u32,
 }
-fn encode_block(input: &[u8], level: u8) -> EncodedBlock {
+fn encode_block(input: &[u8], level: u8, fast: &mut FastWorkspace) -> EncodedBlock {
     let predictor = if level <= 2 { NONE_P } else { choose(input) };
-    let transformed = transform(input, predictor);
-    let packed = encode(&transformed, level);
+    let packed = if predictor == NONE_P {
+        encode(input, level, fast)
+    } else {
+        let transformed = transform(input, predictor);
+        encode(&transformed, level, fast)
+    };
     if packed.len() < input.len() {
         EncodedBlock {
             method: PULSE,
@@ -150,6 +183,7 @@ pub fn compress_stream<R: Read, W: Write>(
         ..Default::default()
     };
     let mut b = vec![0; opt.block_size];
+    let mut fast = FastWorkspace::new();
     loop {
         let n = read_block(r, &mut b)?;
         if n == 0 {
@@ -161,8 +195,12 @@ pub fn compress_stream<R: Read, W: Write>(
         } else {
             choose(input)
         };
-        let t = transform(input, pred);
-        let packed = encode(&t, opt.level);
+        let packed = if pred == NONE_P {
+            encode(input, opt.level, &mut fast)
+        } else {
+            let transformed = transform(input, pred);
+            encode(&transformed, opt.level, &mut fast)
+        };
         let (m, p, sp) = if packed.len() < input.len() {
             (PULSE, packed.as_slice(), pred)
         } else {
@@ -303,9 +341,9 @@ fn choose(i: &[u8]) -> u8 {
         return NONE_P;
     }
     let s = &i[..n];
-    let raw = score(s);
-    let d = score(&transform(s, DELTA));
-    let x = score(&transform(s, XOR));
+    let raw = score(s, NONE_P);
+    let d = score(s, DELTA);
+    let x = score(s, XOR);
     let margin = n / 64;
     if d > raw + margin && d >= x {
         DELTA
@@ -315,21 +353,38 @@ fn choose(i: &[u8]) -> u8 {
         NONE_P
     }
 }
-fn score(i: &[u8]) -> usize {
-    if i.len() < 3 {
+fn predicted(input: &[u8], position: usize, predictor: u8) -> u8 {
+    if position == 0 || predictor == NONE_P {
+        input[position]
+    } else if predictor == DELTA {
+        input[position].wrapping_sub(input[position - 1])
+    } else {
+        input[position] ^ input[position - 1]
+    }
+}
+fn score(input: &[u8], predictor: u8) -> usize {
+    if input.len() < 3 {
         return 0;
     }
-    let mut t = vec![NONE; 4096];
-    let mut s = 0;
-    for p in 0..i.len() - 2 {
-        let h = hash(i, p) & 4095;
-        let old = t[h];
-        if old != NONE && i[old..old + 3] == i[p..p + 3] {
-            s += 1
+    let mut table = vec![NONE; 4096];
+    let mut result = 0;
+    for position in 0..input.len() - 2 {
+        let a = predicted(input, position, predictor);
+        let b = predicted(input, position + 1, predictor);
+        let c = predicted(input, position + 2, predictor);
+        let hash =
+            ((a as usize).wrapping_mul(251) ^ (b as usize).wrapping_mul(31) ^ c as usize) & 4095;
+        let previous = table[hash];
+        if previous != NONE
+            && predicted(input, previous, predictor) == a
+            && predicted(input, previous + 1, predictor) == b
+            && predicted(input, previous + 2, predictor) == c
+        {
+            result += 1;
         }
-        t[h] = p
+        table[hash] = position;
     }
-    s
+    result
 }
 fn transform(i: &[u8], pred: u8) -> Vec<u8> {
     if pred == NONE_P {
@@ -428,22 +483,21 @@ fn common_prefix(i: &[u8], a: usize, b: usize, max: usize) -> usize {
     }
     length
 }
-fn encode(i: &[u8], level: u8) -> Vec<u8> {
+fn encode(i: &[u8], level: u8, fast: &mut FastWorkspace) -> Vec<u8> {
     if level <= 3 {
-        encode_fast(i, level)
+        encode_fast(i, level, fast)
     } else {
         encode_dense(i, level)
     }
 }
-fn encode_fast(i: &[u8], level: u8) -> Vec<u8> {
+fn encode_fast(i: &[u8], level: u8, workspace: &mut FastWorkspace) -> Vec<u8> {
     let mut output = Vec::with_capacity(i.len());
-    let mut head = vec![NONE; HS];
+    workspace.begin_block();
     let (mut position, mut literal_start) = (0, 0);
     while position < i.len() {
         let mut found = (0, 0);
         if position + MIN_M <= i.len() {
-            let candidate = head[hash(i, position)];
-            if candidate != NONE {
+            if let Some(candidate) = workspace.get(hash(i, position)) {
                 let distance = position - candidate;
                 if distance <= MAX_D {
                     let max = MAX_M.min(i.len() - position);
@@ -461,7 +515,7 @@ fn encode_fast(i: &[u8], level: u8) -> Vec<u8> {
             let mut at = position;
             while at < position + found.1 {
                 if at + 3 <= i.len() {
-                    head[hash(i, at)] = at;
+                    workspace.set(hash(i, at), at);
                 }
                 at += step;
             }
@@ -469,7 +523,7 @@ fn encode_fast(i: &[u8], level: u8) -> Vec<u8> {
             literal_start = position;
         } else {
             if position + 3 <= i.len() {
-                head[hash(i, position)] = position;
+                workspace.set(hash(i, position), position);
             }
             position += 1;
             if position - literal_start == 128 {

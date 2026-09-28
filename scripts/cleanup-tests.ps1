@@ -9,8 +9,8 @@ $patterns = @(
     "random.bin", "random.xca", "random-restored.bin",
     "level-*.xca", "xca-corpus.tar", "corpus-level-*.xca",
     "large-corpus.tar", "large-level-*.xca", "large-restored.tar",
-    "benchmark-corpus.tar", "bench-*.xca", "bench-*.zst", "bench-*.xz",
-    "bench-*.lz4", "bench-*.7z", "test-zstd.zst", "test-lz4.7z"
+    "benchmark-corpus.tar", "benchmark-large.bin", "benchmark-level-*.xca", "benchmark-restored.tar", "bench-*.xca", "bench-*.zst", "bench-*.xz",
+    "bench-*.lz4", "large-xca-*.xca", "large-lz4.7z", "large-zstd-*.zst", "bench-*.7z", "test-zstd.zst", "test-lz4.7z"
 )
 
 $files = Get-ChildItem -Path $patterns -File -ErrorAction SilentlyContinue |
