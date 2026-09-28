@@ -1,25 +1,24 @@
 # XCA — eXtended Compression Algorithm
 
-XCA is a dependency-free lossless compression library and CLI written in Rust. Version 0.3 contains the independently implemented XCA3 adaptive block codec, a public Rust API, bounded-memory streaming, a C ABI, corruption detection, and strict resource limits.
+XCA4 Pulse is an independently implemented, dependency-free lossless compression library and CLI written in Rust.
 
-> XCA is usable, but it is not yet proven to outperform LZMA/LZMA2 or LZ4. Any such claim must come from reproducible measurements on a named workload.
+> XCA4 is a working experimental codec. It is not yet proven to beat LZ4 or LZMA universally; performance claims require reproducible corpus benchmarks.
 
-XCA does not call, wrap, or embed any external compression algorithm or compression library. See [ALGORITHM.md](ALGORITHM.md) for the design and [FORMAT.md](FORMAT.md) for the binary specification.
+## XCA4 highlights
 
-## What is implemented
+- new Pulse literal-run, short-match, and long-match command stream;
+- matches up to 65,535 bytes instead of XCA3's 255-byte ceiling;
+- sampled predictor sketch chooses raw, delta, or XOR mode without fully compressing every candidate;
+- one dictionary pass per block, with sparse history updates at fast levels;
+- automatic stored fallback for incompressible blocks;
+- bounded-memory streaming over `Read` and `Write`;
+- block CRC-32 and strict malformed-stream validation;
+- Rust API, C ABI, static library, dynamic library, CLI, tests, and CI;
+- no third-party runtime or compression dependencies.
 
-- per-block selection among stored, RLE, XCA-LZ, delta + XCA-LZ, and XOR + XCA-LZ;
-- independently implemented framing, predictors, match finder, token stream, and decoder;
-- bounded-memory streaming compression and decompression;
-- 64 KiB dictionary window with level-dependent hash-chain search;
-- overlapping match decoding for repeated data;
-- CRC-32 verification for every block;
-- configurable aggregate output limits;
-- strict validation of lengths, matches, truncation, and trailing bytes;
-- Rust `rlib`, native static library, dynamic library, and C header;
-- CLI, tests, CI, benchmark harness, and no third-party runtime dependencies.
+See [ALGORITHM.md](ALGORITHM.md) and [FORMAT.md](FORMAT.md).
 
-## Rust integration
+## Rust
 
 ```toml
 [dependencies]
@@ -27,55 +26,29 @@ xca = { git = "https://github.com/omnizs38/xca", branch = "main" }
 ```
 
 ```rust
-fn main() -> Result<(), xca::Error> {
-    let source = b"data data data data";
-    let encoded = xca::compress_with_level(source, 6)?;
-    let decoded = xca::decompress_with_limit(&encoded, 16 * 1024 * 1024)?;
-    assert_eq!(decoded, source);
-    Ok(())
-}
+let compressed = xca::compress_with_level(b"data data data", 5)?;
+let restored = xca::decompress(&compressed)?;
 ```
 
-For large inputs, use `compress_stream` and `decompress_stream` with any types implementing `Read` and `Write`.
-
-## C and C++ integration
-
-```bash
-cargo build --release --features c-api
-```
-
-Copy the generated static or dynamic library and `include/xca.h` into the host project. Returned buffers must be released with `xca_free`.
+Use `compress_stream` and `decompress_stream` for large inputs.
 
 ## CLI
 
 ```bash
 cargo build --release
-cargo test --all-features
-
-xca compress input.bin output.xca 6
+xca compress input.bin output.xca 5
 xca decompress output.xca restored.bin
 xca check output.xca
 xca info output.xca
 ```
 
-Levels range from 1 (fast search) to 9 (deep search). The decoder does not need the level.
+## Current priorities
 
-## XCA3 format
-
-XCA3 is a multi-block streaming format. Every block declares its selected pipeline, original size, payload size, and CRC-32. Blocks are independently decodable, and a deterministic marker terminates the stream. See [FORMAT.md](FORMAT.md).
-
-## Security model
-
-Treat compressed files as untrusted input. `decompress` limits output to 1 GiB. Applications with smaller records should call `decompress_with_limit`. XCA validates every match and verifies CRC-32, but it has not yet received an independent security audit.
-
-## Roadmap
-
-1. independent canonical entropy coding for literals and token fields;
-2. dictionary reuse and optional seek indexes;
-3. additional transforms for logs, JSON, source code, and time series;
-4. parallel block compression and optional SIMD;
-5. fuzzing, compatibility vectors, and independent format review;
-6. reproducible comparison against LZMA, LZMA2, LZ4, and Zstandard.
+1. reproducible benchmark corpus and comparisons with LZ4, LZMA2, and Zstandard;
+2. independent entropy backend for literal streams;
+3. generation-stamped hash tables and parallel block scheduling;
+4. fuzzing, compatibility vectors, and external format review;
+5. SIMD acceleration where profiling demonstrates value.
 
 ## License
 

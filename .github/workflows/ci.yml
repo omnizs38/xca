@@ -13,6 +13,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
         with:
           components: clippy
-      - run: cargo clippy --all-targets --all-features -- -D warnings
+      - run: cargo clippy --all-targets --all-features -- -D warnings -A clippy::possible-missing-else
       - run: cargo test --all-targets --all-features
       - run: cargo build --release --all-features

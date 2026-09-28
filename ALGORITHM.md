@@ -1,38 +1,28 @@
-# XCA3 algorithm
+# XCA4 Pulse
 
-XCA3 is an independently implemented adaptive block-compression algorithm. It does not call, wrap, or embed LZMA, LZ4, DEFLATE, Zstandard, Brotli, or another compression library. The format, block selector, predictor combinations, framing, validation, and implementation belong to this project.
+XCA4 Pulse is a project-original, independently implemented adaptive lossless codec. It does not wrap or call another compression library.
 
-“Independent” does not mean ignoring established information theory. Dictionary matching, run-length encoding, delta prediction, and XOR prediction are general techniques. XCA combines them in its own deterministic format and implementation.
+## New design
 
-## Pipeline
+XCA4 avoids XCA3's expensive strategy of fully encoding several candidates. Instead, it builds a small repetition sketch from at most 8 KiB of each block. The sketch selects raw, wrapping-delta, or XOR prediction before a single dictionary pass. This makes selection cheap and keeps compression close to one-pass operation.
 
-1. Divide input into independently decodable blocks (256 KiB by default).
-2. Build five candidates per block: stored bytes, byte RLE, XCA hash-chain dictionary encoding, delta prediction plus XCA dictionary encoding, and XOR prediction plus XCA dictionary encoding.
-3. Select the smallest candidate. Ties favor the simpler pipeline evaluated earlier.
-4. Store the method identifier, original and encoded lengths, and CRC-32 for each block.
-5. Close the stream with a deterministic end marker.
+Pulse uses a new command stream:
 
-This adapts locally: text, repeated bytes, counters, telemetry, and mixed binary regions in one file may use different pipelines.
+- literal-run commands carry 1–128 bytes with one tag;
+- short matches carry lengths 4–67 and a 16-bit distance;
+- long matches use a variable-length integer and can represent up to 65,535 bytes with one command;
+- compression levels 1–3 sparsely update match history for speed, while higher levels inspect deeper chains.
 
-## Dictionary representation
+Compared with XCA3, this removes the eight-token flag structure, reduces literal overhead, removes the 255-byte match ceiling, and avoids running five complete encoders per block.
 
-XCA uses a 65,535-byte backward distance and matches of 3–255 bytes. A 65,536-entry three-byte hash table points to history chains. Compression level controls the maximum candidates inspected per position.
+## Adaptive sketch
 
-Tokens are grouped in sets of eight. Each group starts with a flag byte, least-significant bit first:
+The selector hashes three-byte sequences into a compact 4,096-entry sketch and measures confirmed repetition for raw, delta, and XOR samples. A predictor is selected only when it clears a safety margin over raw bytes. Incompressible blocks fall back to stored mode.
 
-- `0`: one literal byte;
-- `1`: little-endian `u16` distance plus `u8` match length.
+## Safety
 
-Overlapping copies are legal and decoded byte by byte.
+Blocks remain independently checksummed with CRC-32. The decoder validates sizes, predictor IDs, command tags, varints, distances, match lengths, aggregate output limits, terminators, and trailing data before accepting a stream.
 
-## Predictors
+## Novelty statement
 
-Delta prediction stores the first byte followed by wrapping byte differences. XOR prediction stores the first byte followed by XOR differences. Both are reversible modulo 256. Their output passes through the XCA dictionary encoder.
-
-## Resource model
-
-Blocks are bounded between 4 KiB and 16 MiB. The decoder validates every length and match before writing output. Callers set an aggregate output limit. Streaming memory is proportional to one block rather than the entire input.
-
-## Current limitations
-
-XCA3 does not yet entropy-code literals or token fields. A future format version may add an independently implemented canonical entropy backend, dictionary reuse, parallel block scheduling, and seek indexes.
+The Pulse command format, sampled predictor selector, sparse level-dependent history policy, framing, and implementation were designed for XCA. The underlying ideas of dictionary matching, hashing, delta prediction, XOR prediction, and variable-length integers are established techniques. No claim of academic novelty or universal superiority is made until prior-art review and reproducible benchmarks are complete.
