@@ -1,9 +1,11 @@
 use crate::{crc32, huffman, Error, FrameInfo, Method};
+use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::thread;
 const MAGIC_V4: &[u8; 4] = b"XCA4";
 const MAGIC_V5: &[u8; 4] = b"XCA5";
 const MAGIC_V6: &[u8; 4] = b"XCA6";
+const MAGIC_V7: &[u8; 4] = b"XCA7";
 const HEADER: usize = 12;
 const BH: usize = 14;
 const END: u8 = 255;
@@ -11,12 +13,16 @@ const STORED: u8 = 0;
 const PULSE: u8 = 1;
 const PULSE_HUFFMAN: u8 = 2;
 const PULSE_SPLIT: u8 = 3;
+const REFERENCE: u8 = 4;
 const NONE_P: u8 = 0;
 const DELTA: u8 = 1;
 const XOR: u8 = 2;
 const MIN_BLOCK: usize = 4096;
 const MAX_BLOCK: usize = 16 * 1024 * 1024;
 const DEFAULT_BLOCK: usize = 256 * 1024;
+const CDC_MIN: usize = 64 * 1024;
+const CDC_MAX: usize = 512 * 1024;
+const CDC_MASK: u64 = (1 << 18) - 1;
 const HS: usize = 1 << 16;
 const MAX_D: usize = u16::MAX as usize;
 const MIN_M: usize = 4;
@@ -50,6 +56,8 @@ pub struct ArchiveAnalysis {
     pub pulse_blocks: u32,
     pub split_pulse_blocks: u32,
     pub entropy_blocks: u32,
+    pub reference_blocks: u32,
+    pub referenced_bytes: u64,
     pub predictor_none_blocks: u32,
     pub predictor_delta_blocks: u32,
     pub predictor_xor_blocks: u32,
@@ -151,20 +159,33 @@ pub fn compress_slice(input: &[u8], level: u8) -> Result<Vec<u8>, Error> {
         ..Default::default()
     };
     valid(options)?;
-    let count = input.len().div_ceil(options.block_size);
+    let (ranges, references) = plan_blocks(input, level, options.block_size);
+    let count = ranges.len();
+    let encoded_block_size = ranges
+        .iter()
+        .map(|(start, end)| end - start)
+        .max()
+        .unwrap_or(options.block_size)
+        .max(MIN_BLOCK);
     let workers = thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(count.max(1));
     let blocks = thread::scope(|scope| {
         let mut handles = Vec::new();
+        let ranges = &ranges;
+        let references = &references;
         for worker in 0..workers {
             handles.push(scope.spawn(move || {
                 let mut local = Vec::new();
                 let mut fast = FastWorkspace::new();
                 for index in (worker..count).step_by(workers) {
-                    let start = index * options.block_size;
-                    let end = (start + options.block_size).min(input.len());
-                    local.push((index, encode_block(&input[start..end], level, &mut fast)));
+                    let (start, end) = ranges[index];
+                    let data = &input[start..end];
+                    let block = match references[index] {
+                        Some(target) => reference_block(data, target),
+                        None => encode_block(data, level, &mut fast),
+                    };
+                    local.push((index, block));
                 }
                 local
             }));
@@ -178,10 +199,11 @@ pub fn compress_slice(input: &[u8], level: u8) -> Result<Vec<u8>, Error> {
         ordered.into_iter().map(Option::unwrap).collect::<Vec<_>>()
     });
     let capacity = HEADER + BH + blocks.iter().map(|b| BH + b.payload.len()).sum::<usize>();
+    let has_references = blocks.iter().any(|block| block.method == REFERENCE);
     let mut output = Vec::with_capacity(capacity);
-    output.extend_from_slice(MAGIC_V6);
-    output.extend_from_slice(&[level, 1, 0, 0]);
-    output.extend_from_slice(&(options.block_size as u32).to_le_bytes());
+    output.extend_from_slice(MAGIC_V7);
+    output.extend_from_slice(&[level, 1 | u8::from(has_references) << 1, 0, 0]);
+    output.extend_from_slice(&(encoded_block_size as u32).to_le_bytes());
     for block in blocks {
         write_block(&mut output, &block);
     }
@@ -223,14 +245,17 @@ fn decode_block(block: BlockDescriptor<'_>) -> Result<Vec<u8>, Error> {
 }
 pub fn decompress_slice(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
     if input.len() < HEADER
-        || &input[..4] != MAGIC_V4 && &input[..4] != MAGIC_V5 && &input[..4] != MAGIC_V6
+        || &input[..4] != MAGIC_V4
+            && &input[..4] != MAGIC_V5
+            && &input[..4] != MAGIC_V6
+            && &input[..4] != MAGIC_V7
     {
         return Err(Error::BadMagic);
     }
     if !(1..=9).contains(&input[4]) {
         return Err(Error::InvalidLevel(input[4]));
     }
-    if input[5] != 1 || input[6] != 0 || input[7] != 0 {
+    if !valid_flags(input[5..8].try_into().unwrap()) {
         return Err(Error::InvalidEntropyData);
     }
     let block_size = u32::from_le_bytes(input[8..12].try_into().unwrap()) as usize;
@@ -281,6 +306,9 @@ pub fn decompress_slice(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
             payload: &input[cursor..end],
             checksum,
         });
+        if method == REFERENCE && input[5] & 2 == 0 {
+            return Err(Error::InvalidMatch);
+        }
         cursor = end;
     }
     let count = descriptors.len();
@@ -294,7 +322,9 @@ pub fn decompress_slice(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
             handles.push(scope.spawn(move || {
                 let mut local = Vec::new();
                 for index in (worker..count).step_by(workers) {
-                    local.push((index, decode_block(descriptors[index])));
+                    if descriptors[index].method != REFERENCE {
+                        local.push((index, decode_block(descriptors[index])));
+                    }
                 }
                 local
             }));
@@ -307,19 +337,189 @@ pub fn decompress_slice(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
         }
         ordered
     });
+    let mut decoded = decoded;
+    let mut ranges = Vec::<(usize, usize)>::with_capacity(count);
     let mut output = Vec::with_capacity(total);
-    for block in decoded {
-        let mut block = block.expect("every XCA block was scheduled")?;
-        output.append(&mut block);
+    for index in 0..count {
+        let descriptor = descriptors[index];
+        if descriptor.method == REFERENCE {
+            if descriptor.predictor != NONE_P || descriptor.payload.len() != 4 {
+                return Err(Error::InvalidMatch);
+            }
+            let target = u32::from_le_bytes(descriptor.payload.try_into().unwrap()) as usize;
+            if target >= index {
+                return Err(Error::InvalidMatch);
+            }
+            let (start, end) = ranges[target];
+            if end - start != descriptor.original {
+                return Err(Error::LengthMismatch {
+                    expected: descriptor.original,
+                    actual: end - start,
+                });
+            }
+            let actual = crc32(&output[start..end]);
+            if actual != descriptor.checksum {
+                return Err(Error::ChecksumMismatch {
+                    expected: descriptor.checksum,
+                    actual,
+                });
+            }
+            let block_start = output.len();
+            output.extend_from_within(start..end);
+            ranges.push((block_start, output.len()));
+        } else {
+            let block = decoded[index]
+                .take()
+                .expect("every independent XCA block was scheduled")?;
+            let block_start = output.len();
+            output.extend_from_slice(&block);
+            ranges.push((block_start, output.len()));
+        }
     }
     Ok(output)
 }
+
+fn plan_blocks(
+    input: &[u8],
+    level: u8,
+    block_size: usize,
+) -> (Vec<(usize, usize)>, Vec<Option<usize>>) {
+    let fixed = fixed_ranges(input.len(), block_size);
+    if level < 4 || input.len() < CDC_MIN * 2 {
+        return (fixed.clone(), vec![None; fixed.len()]);
+    }
+
+    let candidate = if let Some(period) = repeated_period(input) {
+        periodic_ranges(input.len(), period, block_size)
+    } else {
+        content_defined_ranges(input)
+    };
+    let (candidate_references, candidate_bytes) = find_references(input, &candidate);
+    if candidate_bytes >= input.len() / 100 {
+        (candidate, candidate_references)
+    } else {
+        let (fixed_references, _) = find_references(input, &fixed);
+        (fixed, fixed_references)
+    }
+}
+
+fn fixed_ranges(length: usize, block_size: usize) -> Vec<(usize, usize)> {
+    (0..length.div_ceil(block_size))
+        .map(|index| {
+            let start = index * block_size;
+            (start, (start + block_size).min(length))
+        })
+        .collect()
+}
+
+fn repeated_period(input: &[u8]) -> Option<usize> {
+    (2..=64).rev().find_map(|copies| {
+        if input.len().is_multiple_of(copies) {
+            let period = input.len() / copies;
+            (period >= CDC_MIN && input[period..] == input[..input.len() - period])
+                .then_some(period)
+        } else {
+            None
+        }
+    })
+}
+
+fn periodic_ranges(length: usize, period: usize, block_size: usize) -> Vec<(usize, usize)> {
+    let base = fixed_ranges(period, block_size);
+    let copies = length / period;
+    let mut ranges = Vec::with_capacity(base.len() * copies);
+    for copy in 0..copies {
+        let offset = copy * period;
+        ranges.extend(
+            base.iter()
+                .map(|&(start, end)| (start + offset, end + offset)),
+        );
+    }
+    ranges
+}
+
+fn content_defined_ranges(input: &[u8]) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = 0usize;
+    let mut hash = 0u64;
+    for (position, &byte) in input.iter().enumerate() {
+        hash = hash
+            .rotate_left(1)
+            .wrapping_add(gear_value(byte))
+            .wrapping_mul(0x9e37_79b1);
+        let length = position + 1 - start;
+        if length >= CDC_MIN && (hash & CDC_MASK == 0 || length >= CDC_MAX) {
+            ranges.push((start, position + 1));
+            start = position + 1;
+            hash = 0;
+        }
+    }
+    if start < input.len() {
+        ranges.push((start, input.len()));
+    }
+    ranges
+}
+
+fn gear_value(byte: u8) -> u64 {
+    let mut value = byte as u64 + 0x9e37_79b9_7f4a_7c15;
+    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
+    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
+    value ^ (value >> 31)
+}
+
+fn find_references(input: &[u8], ranges: &[(usize, usize)]) -> (Vec<Option<usize>>, usize) {
+    let mut buckets: HashMap<u64, Vec<usize>> = HashMap::new();
+    let mut references = vec![None; ranges.len()];
+    let mut referenced_bytes = 0usize;
+    for (index, &(start, end)) in ranges.iter().enumerate() {
+        let data = &input[start..end];
+        let fingerprint = block_fingerprint(data);
+        let target = buckets.get(&fingerprint).and_then(|candidates| {
+            candidates.iter().copied().find(|&candidate| {
+                let (other_start, other_end) = ranges[candidate];
+                input[other_start..other_end] == *data
+            })
+        });
+        if let Some(target) = target {
+            references[index] = Some(target);
+            referenced_bytes += data.len();
+        } else {
+            buckets.entry(fingerprint).or_default().push(index);
+        }
+    }
+    (references, referenced_bytes)
+}
+
+fn block_fingerprint(data: &[u8]) -> u64 {
+    let mut hash = 0x6a09_e667_f3bc_c909u64 ^ data.len() as u64;
+    let (chunks, remainder) = data.as_chunks::<8>();
+    for chunk in chunks {
+        let value = u64::from_le_bytes(*chunk);
+        hash ^= value.wrapping_mul(0x9e37_79b1_85eb_ca87);
+        hash = hash.rotate_left(27).wrapping_mul(0xc2b2_ae3d_27d4_eb4f);
+    }
+    for &byte in remainder {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100_0000_01b3);
+    }
+    hash ^ (hash >> 29)
+}
+
 struct EncodedBlock {
     method: u8,
     predictor: u8,
     original: u32,
     payload: Vec<u8>,
     checksum: u32,
+}
+fn reference_block(input: &[u8], target: usize) -> EncodedBlock {
+    EncodedBlock {
+        method: REFERENCE,
+        predictor: NONE_P,
+        original: input.len() as u32,
+        payload: (target as u32).to_le_bytes().to_vec(),
+        checksum: crc32(input),
+    }
 }
 fn encode_block(input: &[u8], level: u8, fast: &mut FastWorkspace) -> EncodedBlock {
     let predictor = if level <= 2 { NONE_P } else { choose(input) };
@@ -381,7 +581,7 @@ pub fn compress_stream<R: Read, W: Write>(
     opt: CompressionOptions,
 ) -> Result<StreamStats, Error> {
     valid(opt)?;
-    w.write_all(MAGIC_V6).map_err(ioe)?;
+    w.write_all(MAGIC_V7).map_err(ioe)?;
     w.write_all(&[opt.level, 1, 0, 0]).map_err(ioe)?;
     w.write_all(&(opt.block_size as u32).to_le_bytes())
         .map_err(ioe)?;
@@ -448,15 +648,16 @@ pub fn decompress_stream<R: Read, W: Write>(
 ) -> Result<StreamStats, Error> {
     let mut h = [0; HEADER];
     exact(r, &mut h)?;
-    if &h[..4] != MAGIC_V4 && &h[..4] != MAGIC_V5 && &h[..4] != MAGIC_V6 {
+    if &h[..4] != MAGIC_V4 && &h[..4] != MAGIC_V5 && &h[..4] != MAGIC_V6 && &h[..4] != MAGIC_V7 {
         return Err(Error::BadMagic);
     }
     if !(1..=9).contains(&h[4]) {
         return Err(Error::InvalidLevel(h[4]));
     }
-    if h[5] != 1 || h[6] != 0 || h[7] != 0 {
+    if !valid_flags(h[5..8].try_into().unwrap()) {
         return Err(Error::InvalidEntropyData);
     }
+    let keeps_history = h[5] & 2 != 0;
     let bs = u32::from_le_bytes(h[8..12].try_into().unwrap()) as usize;
     if !(MIN_BLOCK..=MAX_BLOCK).contains(&bs) {
         return Err(Error::InvalidBlockSize(bs));
@@ -465,6 +666,7 @@ pub fn decompress_stream<R: Read, W: Write>(
         input_bytes: HEADER as u64,
         ..Default::default()
     };
+    let mut history = Vec::<Vec<u8>>::new();
     loop {
         let mut h = [0; BH];
         exact(r, &mut h)?;
@@ -503,6 +705,17 @@ pub fn decompress_stream<R: Read, W: Write>(
                 decode(&pulse, n, false)?
             }
             PULSE_SPLIT => split_decode(&p, n)?,
+            REFERENCE if keeps_history && pred == NONE_P && p.len() == 4 => {
+                let target = u32::from_le_bytes(p.try_into().unwrap()) as usize;
+                let referenced = history.get(target).ok_or(Error::InvalidMatch)?;
+                if referenced.len() != n {
+                    return Err(Error::LengthMismatch {
+                        expected: n,
+                        actual: referenced.len(),
+                    });
+                }
+                referenced.clone()
+            }
             STORED => return Err(Error::InvalidMatch),
             x => return Err(Error::UnsupportedMethod(x)),
         };
@@ -515,6 +728,9 @@ pub fn decompress_stream<R: Read, W: Write>(
             });
         }
         w.write_all(&data).map_err(ioe)?;
+        if keeps_history {
+            history.push(data);
+        }
         st.output_bytes += n as u64;
         st.blocks = st.blocks.checked_add(1).ok_or(Error::InputTooLarge)?
     }
@@ -522,14 +738,17 @@ pub fn decompress_stream<R: Read, W: Write>(
 }
 pub fn analyze_archive(input: &[u8]) -> Result<ArchiveAnalysis, Error> {
     if input.len() < HEADER
-        || &input[..4] != MAGIC_V4 && &input[..4] != MAGIC_V5 && &input[..4] != MAGIC_V6
+        || &input[..4] != MAGIC_V4
+            && &input[..4] != MAGIC_V5
+            && &input[..4] != MAGIC_V6
+            && &input[..4] != MAGIC_V7
     {
         return Err(Error::BadMagic);
     }
     if !(1..=9).contains(&input[4]) {
         return Err(Error::InvalidLevel(input[4]));
     }
-    if input[5] != 1 || input[6] != 0 || input[7] != 0 {
+    if !valid_flags(input[5..8].try_into().unwrap()) {
         return Err(Error::InvalidEntropyData);
     }
     let mut result = ArchiveAnalysis {
@@ -537,6 +756,7 @@ pub fn analyze_archive(input: &[u8]) -> Result<ArchiveAnalysis, Error> {
         ..ArchiveAnalysis::default()
     };
     let mut cursor = HEADER;
+    let mut originals = Vec::<usize>::new();
     loop {
         if cursor + BH > input.len() {
             return Err(Error::Truncated);
@@ -565,7 +785,17 @@ pub fn analyze_archive(input: &[u8]) -> Result<ArchiveAnalysis, Error> {
             XOR => result.predictor_xor_blocks += 1,
             value => return Err(Error::UnsupportedMethod(value)),
         }
-        if method == STORED {
+        if method == REFERENCE {
+            if input[5] & 2 == 0 || predictor != NONE_P || packed != 4 {
+                return Err(Error::InvalidMatch);
+            }
+            let target = u32::from_le_bytes(input[cursor..end].try_into().unwrap()) as usize;
+            if target >= originals.len() || originals[target] != original {
+                return Err(Error::InvalidMatch);
+            }
+            result.reference_blocks += 1;
+            result.referenced_bytes += original as u64;
+        } else if method == STORED {
             result.stored_blocks += 1;
             result.literal_commands += 1;
             result.literal_bytes += original as u64;
@@ -635,18 +865,21 @@ pub fn analyze_archive(input: &[u8]) -> Result<ArchiveAnalysis, Error> {
         } else {
             return Err(Error::UnsupportedMethod(method));
         }
+        originals.push(original);
         cursor = end;
     }
     Ok(result)
 }
 pub fn frame_info(i: &[u8]) -> Result<FrameInfo, Error> {
-    if i.len() < HEADER || &i[..4] != MAGIC_V4 && &i[..4] != MAGIC_V5 && &i[..4] != MAGIC_V6 {
+    if i.len() < HEADER
+        || &i[..4] != MAGIC_V4 && &i[..4] != MAGIC_V5 && &i[..4] != MAGIC_V6 && &i[..4] != MAGIC_V7
+    {
         return Err(Error::BadMagic);
     }
     if !(1..=9).contains(&i[4]) {
         return Err(Error::InvalidLevel(i[4]));
     }
-    if i[5] != 1 || i[6] != 0 || i[7] != 0 {
+    if !valid_flags(i[5..8].try_into().unwrap()) {
         return Err(Error::InvalidEntropyData);
     }
     let bs = u32::from_le_bytes(i[8..12].try_into().unwrap()) as usize;
@@ -665,7 +898,9 @@ pub fn frame_info(i: &[u8]) -> Result<FrameInfo, Error> {
                 return Err(Error::TrailingData);
             }
             return Ok(FrameInfo {
-                version: if &i[..4] == MAGIC_V6 {
+                version: if &i[..4] == MAGIC_V7 {
+                    7
+                } else if &i[..4] == MAGIC_V6 {
                     6
                 } else if &i[..4] == MAGIC_V5 {
                     5
@@ -683,12 +918,21 @@ pub fn frame_info(i: &[u8]) -> Result<FrameInfo, Error> {
         if n == 0 || n > bs || pn > n {
             return Err(Error::InvalidBlockSize(n));
         }
-        if !matches!(m, STORED | PULSE | PULSE_HUFFMAN | PULSE_SPLIT) || pred > XOR {
+        if !matches!(m, STORED | PULSE | PULSE_HUFFMAN | PULSE_SPLIT | REFERENCE) || pred > XOR {
             return Err(Error::UnsupportedMethod(m));
+        }
+        if m == REFERENCE && (i[5] & 2 == 0 || pred != NONE_P || pn != 4) {
+            return Err(Error::InvalidMatch);
         }
         c = c.checked_add(pn).ok_or(Error::InputTooLarge)?;
         if c > i.len() {
             return Err(Error::Truncated);
+        }
+        if m == REFERENCE {
+            let target = u32::from_le_bytes(i[c - 4..c].try_into().unwrap());
+            if target >= blocks {
+                return Err(Error::InvalidMatch);
+            }
         }
         original = original.checked_add(n).ok_or(Error::InputTooLarge)?;
         blocks = blocks.checked_add(1).ok_or(Error::InputTooLarge)?
@@ -1258,6 +1502,9 @@ fn valid(o: CompressionOptions) -> Result<(), Error> {
     }
     Ok(())
 }
+fn valid_flags(flags: [u8; 3]) -> bool {
+    flags[0] & 1 == 1 && flags[0] & !3 == 0 && flags[1] == 0 && flags[2] == 0
+}
 fn read_block<R: Read>(r: &mut R, b: &mut [u8]) -> Result<usize, Error> {
     let mut n = 0;
     while n < b.len() {
@@ -1377,12 +1624,52 @@ mod tests {
             );
         }
         let archive = compress_slice(&data, 6).unwrap();
-        assert_eq!(&archive[..4], MAGIC_V6);
+        assert_eq!(&archive[..4], MAGIC_V7);
         assert_eq!(archive[HEADER], PULSE_SPLIT);
         assert_eq!(decompress_slice(&archive, data.len()).unwrap(), data);
 
         let mut damaged = archive;
         damaged[HEADER + BH] ^= 1;
         assert!(decompress_slice(&damaged, data.len()).is_err());
+    }
+
+    #[test]
+    fn long_range_repetition_uses_references() {
+        let base: Vec<u8> = (0..900_000)
+            .map(|index| ((index * 29 + index / 101) & 0xff) as u8)
+            .collect();
+        let mut data = Vec::with_capacity(base.len() * 8);
+        for _ in 0..8 {
+            data.extend_from_slice(&base);
+        }
+        let archive = compress_slice(&data, 5).unwrap();
+        let analysis = analyze_archive(&archive).unwrap();
+        assert!(analysis.reference_blocks > 0);
+        assert!(analysis.referenced_bytes > data.len() as u64 * 3 / 4);
+        assert_eq!(decompress_slice(&archive, data.len()).unwrap(), data);
+    }
+
+    #[test]
+    fn invalid_forward_reference_is_rejected() {
+        let base = b"long range reference validation ".repeat(20_000);
+        let mut data = base.clone();
+        data.extend_from_slice(&base);
+        let mut archive = compress_slice(&data, 5).unwrap();
+        let mut cursor = HEADER;
+        let mut block = 0u32;
+        loop {
+            let method = archive[cursor];
+            let packed =
+                u32::from_le_bytes(archive[cursor + 6..cursor + 10].try_into().unwrap()) as usize;
+            cursor += BH;
+            if method == REFERENCE {
+                archive[cursor..cursor + 4].copy_from_slice(&block.to_le_bytes());
+                assert!(decompress_slice(&archive, data.len()).is_err());
+                break;
+            }
+            assert_ne!(method, END);
+            cursor += packed;
+            block += 1;
+        }
     }
 }

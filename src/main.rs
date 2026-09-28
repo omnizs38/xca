@@ -58,6 +58,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("pulse_blocks: {}", a.pulse_blocks);
             println!("split_pulse_blocks: {}", a.split_pulse_blocks);
             println!("entropy_blocks: {}", a.entropy_blocks);
+            println!("reference_blocks: {}", a.reference_blocks);
+            println!("referenced_bytes: {}", a.referenced_bytes);
+            println!(
+                "referenced_percent: {:.4}",
+                a.referenced_bytes as f64 * 100.0 / a.original_bytes.max(1) as f64
+            );
             println!("predictor_none_blocks: {}", a.predictor_none_blocks);
             println!("predictor_delta_blocks: {}", a.predictor_delta_blocks);
             println!("predictor_xor_blocks: {}", a.predictor_xor_blocks);

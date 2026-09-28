@@ -1,10 +1,12 @@
-# XCA6 binary format
+# XCA7 binary format
 
-All integers are unsigned and little-endian. XCA 0.9 writes XCA6 and accepts legacy XCA4 and XCA5 streams.
+All integers are unsigned and little-endian. XCA 0.10 writes XCA7 and accepts legacy XCA4, XCA5, and XCA6 streams.
 
 ## Stream header
 
-The 12-byte header contains the four-byte magic, compression level, checksum flag, two reserved zero bytes, and maximum uncompressed block size. XCA6 requires the flag/reserved bytes to be exactly `1, 0, 0`.
+The 12-byte header contains the four-byte magic, compression level, flags, two reserved zero bytes, and maximum uncompressed block size.
+
+Flag bit 0 indicates per-block CRC-32 and is required. Flag bit 1 indicates that the archive may contain long-range reference blocks. Other bits are rejected.
 
 ## Block header
 
@@ -14,8 +16,9 @@ Methods:
 
 - `0`: stored bytes;
 - `1`: XCA4 Pulse command stream;
-- `2`: canonical-Huffman-coded Pulse stream (XCA5);
-- `3`: XCA6 Split Pulse.
+- `2`: canonical-Huffman-coded Pulse stream;
+- `3`: XCA6 Split Pulse;
+- `4`: XCA7 long-range reference.
 
 Predictors: `0` none, `1` wrapping delta, `2` XOR.
 
@@ -34,15 +37,12 @@ The payload starts with the uncompressed Pulse-stream size as `u32`, followed by
 
 ## Method 3 Split Pulse payload
 
-A Split Pulse payload begins with `SPL1`, followed by four streams in this order:
+A Split Pulse payload begins with `SPL1`, followed by independently raw- or Huffman-coded streams for command tags, literal bytes, long-match length varints, and distance codes. Distances use a four-entry move-to-front cache; codes `0..3` reference cache entries and other values are LEB128 representations of `distance + 4`.
 
-1. command tags;
-2. literal bytes;
-3. long-match length varints;
-4. distance codes.
+## Method 4 long-range reference
 
-Each stream has a one-byte storage method and `u32` payload length. Storage method `0` is raw and method `1` uses the canonical Huffman payload above. Selection is independent for every stream.
+The payload is a little-endian `u32` index of an earlier block whose reconstructed bytes are identical. References must point backward, use predictor zero, have a four-byte payload, match the referenced block length, and pass their own CRC-32 check.
 
-Distances use a four-entry move-to-front cache. Values `0..3` reference a cache entry. Other values are unsigned LEB128 representations of `distance + 4`. Every referenced or explicit distance is promoted to cache position zero.
+The XCA7 encoder first detects exact whole-input periodicity. Otherwise it evaluates content-defined chunks between 64 and 512 KiB, with an average target near 256 KiB. Chunk fingerprints are only lookup accelerators: byte-for-byte equality is required before a reference is emitted. Content-defined chunking is selected only when references cover at least 1% of the input; otherwise XCA retains fixed blocks.
 
-The decoder bounds every entropy allocation by the block size and validates all stream boundaries, canonical codes, cache references, commands, reconstructed sizes, CRC values, terminators, and trailing data.
+The decoder bounds entropy allocations, validates all references and stream boundaries, and rejects forward references, invalid flags, malformed codes, invalid matches, trailing data, and checksum failures.

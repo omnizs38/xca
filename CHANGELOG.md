@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.10.0 — 2026-09-28
+
+- Introduced the XCA7 long-range deduplication format.
+- Added exact periodicity detection and adaptive content-defined chunking.
+- Added collision-safe backward reference blocks with independent CRC validation.
+- Added direct ordered reference resolution and reference-aware streaming decode.
+- Preserved fixed blocks when dedup coverage is below 1% and preserved the level 1–3 Turbo path.
+- Added analyzer metrics for reference blocks and referenced byte coverage.
+- Expanded the strict suite to 17 tests, including long-range round trips and forward-reference rejection.
+- Reduced a local 64-copy development corpus from 29.17% with XCA6 level 5 to 0.46% with XCA7 level 5.
+
 ## 0.9.1 — 2026-09-28
 
 - Fixed `benchmark-all.ps1` under Windows PowerShell when native codecs write progress to stderr while strict error handling is enabled.

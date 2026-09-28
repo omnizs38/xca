@@ -1,21 +1,22 @@
 # XCA — eXtended Compression Algorithm
 
-XCA 0.9.1 is an independently implemented, dependency-free lossless compression library and CLI written in Rust. It writes XCA6 and decodes XCA4, XCA5, and XCA6 archives.
+XCA 0.10.0 is an independently implemented, dependency-free lossless compression library and CLI written in Rust. It writes XCA7 and decodes XCA4 through XCA7.
 
-> XCA is experimental. No codec wins every corpus and metric. Use the included strict cross-engine benchmark instead of relying on universal claims.
+> XCA is experimental. No codec wins every corpus and metric. Use the included verified cross-engine benchmark for representative data.
 
-## XCA 0.9.1 highlights
+## XCA 0.10.0 highlights
 
-- new XCA6 Split Pulse backend;
-- independent streams for command tags, literals, long lengths, and distances;
-- per-stream raw/canonical-Huffman selection;
-- four-entry move-to-front distance cache with compact explicit-distance varints;
-- direct Split Pulse decoding without reconstructing an intermediate command stream;
-- adaptive fallback to XCA5 whole-stream entropy, raw Pulse, or stored blocks;
-- strict entropy allocation bounds and stream-header validation;
-- deterministic parallel compression/decompression;
-- expanded 15-test adversarial and boundary matrix;
-- strict PowerShell harness comparing XCA, Zstandard, LZ4, and LZMA2 with median timings and SHA-256 verification;
+- global long-range deduplication across the complete in-memory input;
+- exact periodicity detection for repeated snapshots and concatenated corpora;
+- content-defined chunks from 64 to 512 KiB for shifted repetition;
+- collision-safe byte-for-byte verification before references are emitted;
+- compact four-byte backward block references;
+- adaptive fixed-block fallback when dedup coverage is below 1%;
+- XCA6 Split Pulse for every unique block;
+- parallel independent-block decoding and direct ordered reference resolution;
+- reference-specific CRC, length, direction, method, and flag validation;
+- expanded 17-test adversarial suite;
+- strict XCA/Zstandard/LZ4/LZMA2 PowerShell benchmark with SHA-256 verification;
 - no third-party runtime or compression dependencies.
 
 See [ALGORITHM.md](ALGORITHM.md) and [FORMAT.md](FORMAT.md).
@@ -32,7 +33,7 @@ let compressed = xca::compress_with_level(b"data data data", 5)?;
 let restored = xca::decompress(&compressed)?;
 ```
 
-Use `compress_stream` and `decompress_stream` for bounded-memory I/O.
+`compress_with_level` enables global deduplication at levels 4–9. `compress_stream` keeps fixed independent blocks because arbitrary backward references require retained history.
 
 ## CLI
 
@@ -46,9 +47,9 @@ xca analyze output.xca
 xca bench input.bin 7 5
 ```
 
-## Strict validation and cross-engine benchmark
+`xca analyze` reports Split Pulse usage plus `reference_blocks`, `referenced_bytes`, and `referenced_percent`.
 
-Run formatting, strict Clippy, all tests, release build, and a verified benchmark:
+## Strict cross-engine benchmark
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\strict-test.ps1 `
@@ -56,7 +57,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\strict-test.ps1 `
     -Iterations 7
 ```
 
-Benchmark several representative corpora in one run:
+Benchmark multiple corpora directly:
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\scripts\benchmark-all.ps1 `
@@ -64,7 +65,7 @@ powershell -ExecutionPolicy Bypass -File .\scripts\benchmark-all.ps1 `
     -Iterations 7
 ```
 
-The harness requires XCA, Zstandard, 7-Zip, and 7-Zip ZS by default. It performs one warm-up, reports median throughput, records environment metadata, and verifies every decompressed result with SHA-256. Results are written to CSV and JSON.
+The harness requires XCA, Zstandard, 7-Zip, and 7-Zip ZS by default. It performs warm-up runs, reports medians, records environment metadata, and verifies every decompressed output with SHA-256.
 
 ## Cleanup
 
@@ -76,11 +77,11 @@ Add `-DeleteBuild` to also run `cargo clean`.
 
 ## Current priorities
 
-1. reduce Split Pulse table construction overhead;
-2. improve high-level parsing efficiency and level-9 value;
-3. add fuzzing and permanent compatibility vectors;
-4. evaluate bounded asymmetric numeral coding as an optional backend;
-5. use SIMD only where profiling demonstrates an end-to-end benefit.
+1. accelerate reference-heavy decompression and CRC reuse;
+2. improve CDC speed on high-entropy inputs;
+3. add permanent binary compatibility vectors and fuzzing;
+4. improve level-1 parsing and LZ4-class latency;
+5. evaluate a bounded ANS entropy backend for unique blocks.
 
 ## License
 
