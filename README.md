@@ -1,6 +1,6 @@
 # XCA — eXtended Compression Algorithm
 
-XCA 0.11.1 is an independently implemented, dependency-free lossless compression library and CLI written in Rust. It writes XCA8 and decodes XCA4 through XCA8.
+XCA 0.11.2 is an independently implemented, dependency-free lossless compression library and CLI written in Rust. It writes XCA8 and decodes XCA4 through XCA8.
 
 XCA8 has one unified adaptive compression profile. There are no user-selectable XCA levels.
 
@@ -18,7 +18,7 @@ For every input, XCA automatically applies the same decision pipeline:
 
 This removes tuning ambiguity: the same `compress` operation is used for small files, binaries, logs, snapshots, and repeated corpora.
 
-## XCA 0.11.1 highlights
+## XCA 0.11.2 highlights
 
 - new XCA8 unified-profile format;
 - removed levels from the Rust API, C API, CLI, benchmark harness, and stream options;
@@ -27,7 +27,9 @@ This removes tuning ambiguity: the same `compress` operation is used for small f
 - adaptive fixed-block fallback when dedup coverage is below 1%;
 - XCA6 Split Pulse for unique blocks;
 - backward decoding compatibility with XCA4–XCA7;
-- 18 strict adversarial, determinism, reference, corruption, and boundary tests;
+- adaptive parallel output assembly for large reference-heavy archives;
+- simple Rust file helpers plus C, C++, and Python integration layers;
+- 19 strict adversarial, determinism, reference, corruption, file, and boundary tests;
 - verified XCA/Zstandard/LZ4/LZMA2 PowerShell benchmark suite;
 - no third-party runtime or compression dependencies.
 
@@ -43,6 +45,9 @@ xca = { git = "https://github.com/omnizs38/xca", branch = "main" }
 ```rust
 let compressed = xca::compress(b"data data data");
 let restored = xca::decompress(&compressed)?;
+
+xca::compress_file("input.bin", "output.xca")?;
+xca::decompress_file("output.xca", "restored.bin")?;
 ```
 
 ## C
@@ -50,7 +55,10 @@ let restored = xca::decompress(&compressed)?;
 ```c
 XcaBuffer compressed;
 int32_t result = xca_compress(data, length, &compressed);
+xca_buffer_free(&compressed);
 ```
+
+See [INTEGRATION.md](INTEGRATION.md) for complete Rust, C, C++, Python, generic C ABI, and subprocess examples.
 
 ## CLI
 
@@ -90,7 +98,7 @@ Add `-DeleteBuild` to also run `cargo clean`.
 
 ## Current priorities
 
-1. improve unique-block decompression and entropy table reuse;
+1. improve entropy table reuse;
 2. improve CDC speed on high-entropy inputs;
 3. add permanent binary compatibility vectors and fuzzing;
 4. improve low-latency parsing without adding user-facing modes;

@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.2 — 2026-09-28
+
+- Added adaptive parallel final-output assembly for large reference-heavy archives while retaining a low-overhead sequential path below 64 MiB.
+- Added Rust `compress_file` and `decompress_file` helpers with byte-count statistics.
+- Enabled the stable C ABI by default and added version, error-string, and buffer-lifecycle functions.
+- Added a header-only C++ wrapper and a dependency-free Python `ctypes` binding.
+- Added ready-to-run Rust, C, and Python examples plus a language-neutral integration guide.
+- Added file-helper round-trip coverage, bringing the suite to 19 tests.
+
 ## 0.11.1 — 2026-09-28
 
 - Reused the already validated target checksum for long-range reference blocks instead of rescanning identical bytes.

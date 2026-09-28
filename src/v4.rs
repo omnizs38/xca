@@ -305,9 +305,12 @@ pub fn decompress_slice(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
         }
         ordered
     });
-    let mut decoded = decoded;
-    let mut ranges = Vec::<(usize, usize)>::with_capacity(count);
-    let mut output = Vec::with_capacity(total);
+    let mut decoded_results = decoded;
+    let mut decoded = Vec::<Option<Vec<u8>>>::with_capacity(count);
+    decoded.resize_with(count, || None);
+    let mut roots = vec![0usize; count];
+    let mut offsets = Vec::with_capacity(count + 1);
+    offsets.push(0usize);
     for index in 0..count {
         let descriptor = descriptors[index];
         if descriptor.method == REFERENCE {
@@ -318,11 +321,10 @@ pub fn decompress_slice(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
             if target >= index {
                 return Err(Error::InvalidMatch);
             }
-            let (start, end) = ranges[target];
-            if end - start != descriptor.original {
+            if descriptors[target].original != descriptor.original {
                 return Err(Error::LengthMismatch {
                     expected: descriptor.original,
-                    actual: end - start,
+                    actual: descriptors[target].original,
                 });
             }
             let target_checksum = descriptors[target].checksum;
@@ -332,18 +334,59 @@ pub fn decompress_slice(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
                     actual: target_checksum,
                 });
             }
-            let block_start = output.len();
-            output.extend_from_within(start..end);
-            ranges.push((block_start, output.len()));
+            roots[index] = roots[target];
         } else {
-            let block = decoded[index]
+            let block = decoded_results[index]
                 .take()
                 .expect("every independent XCA block was scheduled")?;
-            let block_start = output.len();
-            output.extend_from_slice(&block);
-            ranges.push((block_start, output.len()));
+            roots[index] = index;
+            decoded[index] = Some(block);
         }
+        offsets.push(
+            offsets[index]
+                .checked_add(descriptor.original)
+                .ok_or(Error::InputTooLarge)?,
+        );
     }
+
+    const PARALLEL_ASSEMBLY_THRESHOLD: usize = 64 * 1024 * 1024;
+    if total < PARALLEL_ASSEMBLY_THRESHOLD || workers == 1 {
+        let mut output = Vec::with_capacity(total);
+        for index in 0..count {
+            let source = decoded[roots[index]]
+                .as_ref()
+                .expect("reference root must be independently decoded");
+            output.extend_from_slice(source);
+        }
+        return Ok(output);
+    }
+
+    let mut output = vec![0u8; total];
+    thread::scope(|scope| {
+        let mut remaining = output.as_mut_slice();
+        let mut first = 0usize;
+        for worker in 0..workers {
+            let last = count * (worker + 1) / workers;
+            let byte_count = offsets[last] - offsets[first];
+            let (partition, rest) = remaining.split_at_mut(byte_count);
+            remaining = rest;
+            let base = offsets[first];
+            let roots = &roots;
+            let offsets = &offsets;
+            let decoded = &decoded;
+            scope.spawn(move || {
+                for index in first..last {
+                    let source = decoded[roots[index]]
+                        .as_ref()
+                        .expect("reference root must be independently decoded");
+                    let start = offsets[index] - base;
+                    let end = offsets[index + 1] - base;
+                    partition[start..end].copy_from_slice(source);
+                }
+            });
+            first = last;
+        }
+    });
     Ok(output)
 }
 

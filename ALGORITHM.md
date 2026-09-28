@@ -25,7 +25,7 @@ Unique blocks separate command tags, literals, long lengths, and distances. Each
 
 ## Parallelism and streaming
 
-Unique blocks are compressed and decoded in parallel with deterministic ordering. References are resolved directly into the final output. The streaming encoder uses fixed independent blocks and the same unified block codec; in-memory compression additionally enables global deduplication.
+Unique blocks are compressed and decoded in parallel with deterministic ordering. References are resolved directly into the final output. Small outputs use low-overhead sequential assembly; outputs of at least 64 MiB are partitioned into disjoint ranges and assembled in parallel. The streaming encoder uses fixed independent blocks and the same unified block codec; in-memory compression additionally enables global deduplication.
 
 ## Strict validation
 

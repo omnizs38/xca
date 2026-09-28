@@ -1,5 +1,5 @@
 //! XCA8: an independently implemented adaptive lossless compression codec.
-use std::fmt;
+use std::{fmt, fs, path::Path};
 mod codec;
 mod huffman;
 mod v4;
@@ -9,6 +9,12 @@ pub use v4::{
     StreamStats,
 };
 const DEFAULT_OUTPUT_LIMIT: usize = 1 << 30;
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct FileStats {
+    pub input_bytes: u64,
+    pub output_bytes: u64,
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Method {
     Stored,
@@ -88,11 +94,36 @@ pub fn decompress_with_limit(input: &[u8], limit: usize) -> Result<Vec<u8>, Erro
 pub fn frame_info(input: &[u8]) -> Result<FrameInfo, Error> {
     v4::frame_info(input)
 }
+pub fn compress_file(
+    input_path: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
+) -> Result<FileStats, Error> {
+    let input = fs::read(input_path).map_err(|error| Error::Io(error.to_string()))?;
+    let output = compress(&input);
+    fs::write(output_path, &output).map_err(|error| Error::Io(error.to_string()))?;
+    Ok(FileStats {
+        input_bytes: input.len() as u64,
+        output_bytes: output.len() as u64,
+    })
+}
+pub fn decompress_file(
+    input_path: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
+) -> Result<FileStats, Error> {
+    let input = fs::read(input_path).map_err(|error| Error::Io(error.to_string()))?;
+    let output = decompress(&input)?;
+    fs::write(output_path, &output).map_err(|error| Error::Io(error.to_string()))?;
+    Ok(FileStats {
+        input_bytes: input.len() as u64,
+        output_bytes: output.len() as u64,
+    })
+}
 #[cfg(feature = "c-api")]
 mod c_api;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::{SystemTime, UNIX_EPOCH};
     #[test]
     fn round_trip_unified_profile() {
         let d = b"XCA independent codec XCA independent codec";
@@ -117,5 +148,29 @@ mod tests {
             decompress_with_limit(&d, 100),
             Err(Error::OutputLimitExceeded { .. })
         ))
+    }
+    #[test]
+    fn file_helpers_round_trip() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir();
+        let source = root.join(format!("xca-{nonce}-source.bin"));
+        let archive = root.join(format!("xca-{nonce}-archive.xca"));
+        let restored = root.join(format!("xca-{nonce}-restored.bin"));
+        let data = b"portable XCA file helper ".repeat(4096);
+
+        fs::write(&source, &data).unwrap();
+        let compressed = compress_file(&source, &archive).unwrap();
+        let decompressed = decompress_file(&archive, &restored).unwrap();
+
+        assert_eq!(compressed.input_bytes, data.len() as u64);
+        assert_eq!(decompressed.output_bytes, data.len() as u64);
+        assert_eq!(fs::read(&restored).unwrap(), data);
+
+        for path in [source, archive, restored] {
+            let _ = fs::remove_file(path);
+        }
     }
 }
