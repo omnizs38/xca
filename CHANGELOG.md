@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.7.0 — 2026-09-28
+
+- Added parallel block decompression for in-memory callers and the CLI.
+- Added strict parallel descriptor parsing, ordered reconstruction, per-block CRC validation, and aggregate output limits.
+- Added `xca bench <input> [iterations] [level]` to measure codec CPU throughput without output-file I/O.
+- Preserved XCA4 format compatibility and encoded sizes.
+- Improved local large-file end-to-end decompression by roughly 40%.
+- Retained strict Clippy and all correctness tests.
+
 ## 0.6.0 — 2026-09-28
 
 - Replaced bit-at-a-time CRC-32 with a compile-time table-driven implementation.

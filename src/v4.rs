@@ -1,5 +1,5 @@
 use crate::{crc32, Error, FrameInfo, Method};
-use std::io::{Cursor, Read, Write};
+use std::io::{Read, Write};
 use std::thread;
 const MAGIC: &[u8; 4] = b"XCA4";
 const HEADER: usize = 12;
@@ -109,14 +109,120 @@ pub fn compress_slice(input: &[u8], level: u8) -> Result<Vec<u8>, Error> {
     output.extend_from_slice(&[0; 12]);
     Ok(output)
 }
-pub fn decompress_slice(i: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
-    let mut r = Cursor::new(i);
-    let mut o = Vec::new();
-    decompress_stream(&mut r, &mut o, limit)?;
-    if r.position() as usize != i.len() {
-        return Err(Error::TrailingData);
+#[derive(Clone, Copy)]
+struct BlockDescriptor<'a> {
+    method: u8,
+    predictor: u8,
+    original: usize,
+    payload: &'a [u8],
+    checksum: u32,
+}
+fn decode_block(block: BlockDescriptor<'_>) -> Result<Vec<u8>, Error> {
+    let mut decoded = match block.method {
+        STORED if block.predictor == NONE_P && block.payload.len() == block.original => {
+            block.payload.to_vec()
+        }
+        PULSE => decode(block.payload, block.original)?,
+        STORED => return Err(Error::InvalidMatch),
+        value => return Err(Error::UnsupportedMethod(value)),
+    };
+    inverse(&mut decoded, block.predictor)?;
+    let actual = crc32(&decoded);
+    if actual != block.checksum {
+        return Err(Error::ChecksumMismatch {
+            expected: block.checksum,
+            actual,
+        });
     }
-    Ok(o)
+    Ok(decoded)
+}
+pub fn decompress_slice(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
+    if input.len() < HEADER || &input[..4] != MAGIC {
+        return Err(Error::BadMagic);
+    }
+    if !(1..=9).contains(&input[4]) {
+        return Err(Error::InvalidLevel(input[4]));
+    }
+    let block_size = u32::from_le_bytes(input[8..12].try_into().unwrap()) as usize;
+    if !(MIN_BLOCK..=MAX_BLOCK).contains(&block_size) {
+        return Err(Error::InvalidBlockSize(block_size));
+    }
+    let mut cursor = HEADER;
+    let mut total = 0usize;
+    let mut descriptors = Vec::new();
+    loop {
+        if cursor + BH > input.len() {
+            return Err(Error::Truncated);
+        }
+        let header = &input[cursor..cursor + BH];
+        cursor += BH;
+        let method = header[0];
+        let predictor = header[1];
+        let original = u32::from_le_bytes(header[2..6].try_into().unwrap()) as usize;
+        let packed = u32::from_le_bytes(header[6..10].try_into().unwrap()) as usize;
+        let checksum = u32::from_le_bytes(header[10..14].try_into().unwrap());
+        if method == END {
+            if predictor != 0 || original != 0 || packed != 0 || checksum != 0 {
+                return Err(Error::InvalidMatch);
+            }
+            if cursor != input.len() {
+                return Err(Error::TrailingData);
+            }
+            break;
+        }
+        if original == 0 || original > block_size || packed > original {
+            return Err(Error::InvalidBlockSize(original));
+        }
+        total = total.checked_add(original).ok_or(Error::InputTooLarge)?;
+        if total > limit {
+            return Err(Error::OutputLimitExceeded {
+                requested: total,
+                limit,
+            });
+        }
+        let end = cursor.checked_add(packed).ok_or(Error::InputTooLarge)?;
+        if end > input.len() {
+            return Err(Error::Truncated);
+        }
+        descriptors.push(BlockDescriptor {
+            method,
+            predictor,
+            original,
+            payload: &input[cursor..end],
+            checksum,
+        });
+        cursor = end;
+    }
+    let count = descriptors.len();
+    let workers = thread::available_parallelism()
+        .map_or(1, |n| n.get())
+        .min(count.max(1));
+    let decoded = thread::scope(|scope| {
+        let mut handles = Vec::new();
+        for worker in 0..workers {
+            let descriptors = &descriptors;
+            handles.push(scope.spawn(move || {
+                let mut local = Vec::new();
+                for index in (worker..count).step_by(workers) {
+                    local.push((index, decode_block(descriptors[index])));
+                }
+                local
+            }));
+        }
+        let mut ordered: Vec<Option<Result<Vec<u8>, Error>>> = (0..count).map(|_| None).collect();
+        for handle in handles {
+            for (index, block) in handle.join().expect("XCA decoder worker panicked") {
+                ordered[index] = Some(block);
+            }
+        }
+        ordered
+    });
+    let mut output = Vec::with_capacity(total);
+    for block in decoded {
+        let mut block = block.expect("every XCA block was scheduled")?;
+        output.append(&mut block);
+    }
+    Ok(output)
 }
 struct EncodedBlock {
     method: u8,
