@@ -6,6 +6,7 @@ const MAGIC_V4: &[u8; 4] = b"XCA4";
 const MAGIC_V5: &[u8; 4] = b"XCA5";
 const MAGIC_V6: &[u8; 4] = b"XCA6";
 const MAGIC_V7: &[u8; 4] = b"XCA7";
+const MAGIC_V8: &[u8; 4] = b"XCA8";
 const HEADER: usize = 12;
 const BH: usize = 14;
 const END: u8 = 255;
@@ -28,15 +29,14 @@ const MAX_D: usize = u16::MAX as usize;
 const MIN_M: usize = 4;
 const MAX_M: usize = u16::MAX as usize;
 const NONE: usize = usize::MAX;
+const UNIFIED_DEPTH: usize = 16;
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressionOptions {
-    pub level: u8,
     pub block_size: usize,
 }
 impl Default for CompressionOptions {
     fn default() -> Self {
         Self {
-            level: 5,
             block_size: DEFAULT_BLOCK,
         }
     }
@@ -68,35 +68,6 @@ pub struct ArchiveAnalysis {
     pub matched_bytes: u64,
     pub distance_total: u64,
 }
-struct FastWorkspace {
-    positions: Vec<u32>,
-    stamps: Vec<u32>,
-    generation: u32,
-}
-impl FastWorkspace {
-    fn new() -> Self {
-        Self {
-            positions: vec![0; HS],
-            stamps: vec![0; HS],
-            generation: 0,
-        }
-    }
-    fn begin_block(&mut self) {
-        self.generation = self.generation.wrapping_add(1);
-        if self.generation == 0 {
-            self.stamps.fill(0);
-            self.generation = 1;
-        }
-    }
-    fn get(&self, hash: usize) -> Option<usize> {
-        (self.stamps[hash] == self.generation).then_some(self.positions[hash] as usize)
-    }
-    fn set(&mut self, hash: usize, position: usize) {
-        self.positions[hash] = position as u32;
-        self.stamps[hash] = self.generation;
-    }
-}
-
 #[derive(Default)]
 struct DistanceCache {
     values: [usize; 4],
@@ -153,13 +124,10 @@ impl DistanceCache {
         Ok(distance)
     }
 }
-pub fn compress_slice(input: &[u8], level: u8) -> Result<Vec<u8>, Error> {
-    let options = CompressionOptions {
-        level,
-        ..Default::default()
-    };
+pub fn compress_slice(input: &[u8]) -> Result<Vec<u8>, Error> {
+    let options = CompressionOptions::default();
     valid(options)?;
-    let (ranges, references) = plan_blocks(input, level, options.block_size);
+    let (ranges, references) = plan_blocks(input, options.block_size);
     let count = ranges.len();
     let encoded_block_size = ranges
         .iter()
@@ -177,13 +145,12 @@ pub fn compress_slice(input: &[u8], level: u8) -> Result<Vec<u8>, Error> {
         for worker in 0..workers {
             handles.push(scope.spawn(move || {
                 let mut local = Vec::new();
-                let mut fast = FastWorkspace::new();
                 for index in (worker..count).step_by(workers) {
                     let (start, end) = ranges[index];
                     let data = &input[start..end];
                     let block = match references[index] {
                         Some(target) => reference_block(data, target),
-                        None => encode_block(data, level, &mut fast),
+                        None => encode_block(data),
                     };
                     local.push((index, block));
                 }
@@ -201,8 +168,8 @@ pub fn compress_slice(input: &[u8], level: u8) -> Result<Vec<u8>, Error> {
     let capacity = HEADER + BH + blocks.iter().map(|b| BH + b.payload.len()).sum::<usize>();
     let has_references = blocks.iter().any(|block| block.method == REFERENCE);
     let mut output = Vec::with_capacity(capacity);
-    output.extend_from_slice(MAGIC_V7);
-    output.extend_from_slice(&[level, 1 | u8::from(has_references) << 1, 0, 0]);
+    output.extend_from_slice(MAGIC_V8);
+    output.extend_from_slice(&[0, 1 | u8::from(has_references) << 1, 0, 0]);
     output.extend_from_slice(&(encoded_block_size as u32).to_le_bytes());
     for block in blocks {
         write_block(&mut output, &block);
@@ -249,10 +216,11 @@ pub fn decompress_slice(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
             && &input[..4] != MAGIC_V5
             && &input[..4] != MAGIC_V6
             && &input[..4] != MAGIC_V7
+            && &input[..4] != MAGIC_V8
     {
         return Err(Error::BadMagic);
     }
-    if !(1..=9).contains(&input[4]) {
+    if !valid_profile(&input[..4], input[4]) {
         return Err(Error::InvalidLevel(input[4]));
     }
     if !valid_flags(input[5..8].try_into().unwrap()) {
@@ -379,13 +347,9 @@ pub fn decompress_slice(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
     Ok(output)
 }
 
-fn plan_blocks(
-    input: &[u8],
-    level: u8,
-    block_size: usize,
-) -> (Vec<(usize, usize)>, Vec<Option<usize>>) {
+fn plan_blocks(input: &[u8], block_size: usize) -> (Vec<(usize, usize)>, Vec<Option<usize>>) {
     let fixed = fixed_ranges(input.len(), block_size);
-    if level < 4 || input.len() < CDC_MIN * 2 {
+    if input.len() < CDC_MIN * 2 {
         return (fixed.clone(), vec![None; fixed.len()]);
     }
 
@@ -521,24 +485,21 @@ fn reference_block(input: &[u8], target: usize) -> EncodedBlock {
         checksum: crc32(input),
     }
 }
-fn encode_block(input: &[u8], level: u8, fast: &mut FastWorkspace) -> EncodedBlock {
-    let predictor = if level <= 2 { NONE_P } else { choose(input) };
+fn encode_block(input: &[u8]) -> EncodedBlock {
+    let predictor = choose(input);
     let packed = if predictor == NONE_P {
-        encode(input, level, fast)
+        encode(input)
     } else {
         let transformed = transform(input, predictor);
-        encode(&transformed, level, fast)
+        encode(&transformed)
     };
-    let split = (level >= 4)
-        .then(|| split_encode(&packed, input.len()))
-        .flatten();
+    let split = split_encode(&packed, input.len());
     let (method, payload) = match split {
         Some(encoded) if encoded.len() < packed.len() => (PULSE_SPLIT, encoded),
-        _ if level >= 4 => match huffman::encode(&packed) {
+        _ => match huffman::encode(&packed) {
             Some(encoded) if encoded.len() < packed.len() => (PULSE_HUFFMAN, encoded),
             _ => (PULSE, packed),
         },
-        _ => (PULSE, packed),
     };
     if payload.len() < input.len() {
         EncodedBlock {
@@ -581,8 +542,8 @@ pub fn compress_stream<R: Read, W: Write>(
     opt: CompressionOptions,
 ) -> Result<StreamStats, Error> {
     valid(opt)?;
-    w.write_all(MAGIC_V7).map_err(ioe)?;
-    w.write_all(&[opt.level, 1, 0, 0]).map_err(ioe)?;
+    w.write_all(MAGIC_V8).map_err(ioe)?;
+    w.write_all(&[0, 1, 0, 0]).map_err(ioe)?;
     w.write_all(&(opt.block_size as u32).to_le_bytes())
         .map_err(ioe)?;
     let mut st = StreamStats {
@@ -590,36 +551,26 @@ pub fn compress_stream<R: Read, W: Write>(
         ..Default::default()
     };
     let mut b = vec![0; opt.block_size];
-    let mut fast = FastWorkspace::new();
     loop {
         let n = read_block(r, &mut b)?;
         if n == 0 {
             break;
         }
         let input = &b[..n];
-        let pred = if opt.level <= 2 {
-            NONE_P
-        } else {
-            choose(input)
-        };
+        let pred = choose(input);
         let packed = if pred == NONE_P {
-            encode(input, opt.level, &mut fast)
+            encode(input)
         } else {
             let transformed = transform(input, pred);
-            encode(&transformed, opt.level, &mut fast)
+            encode(&transformed)
         };
-        let split = if opt.level >= 4 {
-            split_encode(&packed, input.len())
-        } else {
-            None
-        };
+        let split = split_encode(&packed, input.len());
         let (m, owned) = match split {
             Some(encoded) if encoded.len() < packed.len() => (PULSE_SPLIT, encoded),
-            _ if opt.level >= 4 => match huffman::encode(&packed) {
+            _ => match huffman::encode(&packed) {
                 Some(encoded) if encoded.len() < packed.len() => (PULSE_HUFFMAN, encoded),
                 _ => (PULSE, packed),
             },
-            _ => (PULSE, packed),
         };
         let sp = pred;
         let (m, p, sp) = if owned.len() < input.len() {
@@ -648,10 +599,15 @@ pub fn decompress_stream<R: Read, W: Write>(
 ) -> Result<StreamStats, Error> {
     let mut h = [0; HEADER];
     exact(r, &mut h)?;
-    if &h[..4] != MAGIC_V4 && &h[..4] != MAGIC_V5 && &h[..4] != MAGIC_V6 && &h[..4] != MAGIC_V7 {
+    if &h[..4] != MAGIC_V4
+        && &h[..4] != MAGIC_V5
+        && &h[..4] != MAGIC_V6
+        && &h[..4] != MAGIC_V7
+        && &h[..4] != MAGIC_V8
+    {
         return Err(Error::BadMagic);
     }
-    if !(1..=9).contains(&h[4]) {
+    if !valid_profile(&h[..4], h[4]) {
         return Err(Error::InvalidLevel(h[4]));
     }
     if !valid_flags(h[5..8].try_into().unwrap()) {
@@ -742,10 +698,11 @@ pub fn analyze_archive(input: &[u8]) -> Result<ArchiveAnalysis, Error> {
             && &input[..4] != MAGIC_V5
             && &input[..4] != MAGIC_V6
             && &input[..4] != MAGIC_V7
+            && &input[..4] != MAGIC_V8
     {
         return Err(Error::BadMagic);
     }
-    if !(1..=9).contains(&input[4]) {
+    if !valid_profile(&input[..4], input[4]) {
         return Err(Error::InvalidLevel(input[4]));
     }
     if !valid_flags(input[5..8].try_into().unwrap()) {
@@ -872,11 +829,15 @@ pub fn analyze_archive(input: &[u8]) -> Result<ArchiveAnalysis, Error> {
 }
 pub fn frame_info(i: &[u8]) -> Result<FrameInfo, Error> {
     if i.len() < HEADER
-        || &i[..4] != MAGIC_V4 && &i[..4] != MAGIC_V5 && &i[..4] != MAGIC_V6 && &i[..4] != MAGIC_V7
+        || &i[..4] != MAGIC_V4
+            && &i[..4] != MAGIC_V5
+            && &i[..4] != MAGIC_V6
+            && &i[..4] != MAGIC_V7
+            && &i[..4] != MAGIC_V8
     {
         return Err(Error::BadMagic);
     }
-    if !(1..=9).contains(&i[4]) {
+    if !valid_profile(&i[..4], i[4]) {
         return Err(Error::InvalidLevel(i[4]));
     }
     if !valid_flags(i[5..8].try_into().unwrap()) {
@@ -898,7 +859,9 @@ pub fn frame_info(i: &[u8]) -> Result<FrameInfo, Error> {
                 return Err(Error::TrailingData);
             }
             return Ok(FrameInfo {
-                version: if &i[..4] == MAGIC_V7 {
+                version: if &i[..4] == MAGIC_V8 {
+                    8
+                } else if &i[..4] == MAGIC_V7 {
                     7
                 } else if &i[..4] == MAGIC_V6 {
                     6
@@ -908,7 +871,7 @@ pub fn frame_info(i: &[u8]) -> Result<FrameInfo, Error> {
                     4
                 },
                 method: Method::Adaptive,
-                level: i[4],
+                legacy_level: (&i[..4] != MAGIC_V8).then_some(i[4]),
                 original_size: original,
                 frame_size: i.len(),
                 checksum: true,
@@ -1029,9 +992,6 @@ fn hash(i: &[u8], p: usize) -> usize {
     ((i[p] as usize).wrapping_mul(251) ^ (i[p + 1] as usize).wrapping_mul(31) ^ i[p + 2] as usize)
         & (HS - 1)
 }
-fn depth(l: u8) -> usize {
-    [0, 1, 2, 4, 8, 16, 24, 40, 64, 96][l as usize]
-}
 fn insert(i: &[u8], p: usize, h: &mut [usize], prev: &mut [usize]) {
     if p + 3 > i.len() {
         return;
@@ -1068,92 +1028,20 @@ fn find(i: &[u8], p: usize, h: &[usize], prev: &[usize], md: usize) -> (usize, u
     }
     (bd, bl)
 }
-fn common_prefix(i: &[u8], a: usize, b: usize, max: usize) -> usize {
-    let mut length = 0;
-    while length + 8 <= max {
-        let left = &i[a + length..a + length + 8];
-        let right = &i[b + length..b + length + 8];
-        if left == right {
-            length += 8;
-        } else {
-            while length < max && i[a + length] == i[b + length] {
-                length += 1;
-            }
-            return length;
-        }
-    }
-    while length < max && i[a + length] == i[b + length] {
-        length += 1;
-    }
-    length
-}
-fn encode(i: &[u8], level: u8, fast: &mut FastWorkspace) -> Vec<u8> {
-    if level <= 3 {
-        encode_fast(i, level, fast)
-    } else {
-        encode_dense(i, level)
-    }
-}
-fn encode_fast(i: &[u8], level: u8, workspace: &mut FastWorkspace) -> Vec<u8> {
-    let mut output = Vec::with_capacity(i.len());
-    workspace.begin_block();
-    let (mut position, mut literal_start) = (0, 0);
-    while position < i.len() {
-        let mut found = (0, 0);
-        if position + MIN_M <= i.len() {
-            if let Some(candidate) = workspace.get(hash(i, position)) {
-                let distance = position - candidate;
-                if distance <= MAX_D {
-                    let max = MAX_M.min(i.len() - position);
-                    let length = common_prefix(i, candidate, position, max);
-                    if length >= MIN_M {
-                        found = (distance, length);
-                    }
-                }
-            }
-        }
-        if found.1 >= MIN_M {
-            literals(&mut output, &i[literal_start..position]);
-            match_token(&mut output, found.0, found.1);
-            let step = if level == 1 { 8 } else { 4 };
-            let mut at = position;
-            while at < position + found.1 {
-                if at + 3 <= i.len() {
-                    workspace.set(hash(i, at), at);
-                }
-                at += step;
-            }
-            position += found.1;
-            literal_start = position;
-        } else {
-            if position + 3 <= i.len() {
-                workspace.set(hash(i, position), position);
-            }
-            position += 1;
-            if position - literal_start == 128 {
-                literals(&mut output, &i[literal_start..position]);
-                literal_start = position;
-            }
-        }
-    }
-    literals(&mut output, &i[literal_start..]);
-    output
-}
-fn encode_dense(i: &[u8], level: u8) -> Vec<u8> {
+fn encode(i: &[u8]) -> Vec<u8> {
     let mut o = Vec::with_capacity(i.len());
     let mut h = vec![NONE; HS];
     let mut prev = vec![NONE; i.len()];
     let (mut p, mut lit) = (0, 0);
     while p < i.len() {
-        let (d, l) = find(i, p, &h, &prev, depth(level));
+        let (d, l) = find(i, p, &h, &prev, UNIFIED_DEPTH);
         if l >= MIN_M {
             literals(&mut o, &i[lit..p]);
             match_token(&mut o, d, l);
-            let step = if level <= 3 { 4 } else { 1 };
             let mut x = p;
             while x < p + l {
                 insert(i, x, &mut h, &mut prev);
-                x += step
+                x += 1
             }
             p += l;
             lit = p
@@ -1494,13 +1382,17 @@ fn get_var_first(i: &[u8], p: &mut usize, first: u8) -> Result<u32, Error> {
     }
 }
 fn valid(o: CompressionOptions) -> Result<(), Error> {
-    if !(1..=9).contains(&o.level) {
-        return Err(Error::InvalidLevel(o.level));
-    }
     if !(MIN_BLOCK..=MAX_BLOCK).contains(&o.block_size) {
         return Err(Error::InvalidBlockSize(o.block_size));
     }
     Ok(())
+}
+fn valid_profile(magic: &[u8], profile: u8) -> bool {
+    if magic == MAGIC_V8 {
+        profile == 0
+    } else {
+        (1..=9).contains(&profile)
+    }
 }
 fn valid_flags(flags: [u8; 3]) -> bool {
     flags[0] & 1 == 1 && flags[0] & !3 == 0 && flags[1] == 0 && flags[2] == 0
@@ -1535,22 +1427,20 @@ mod tests {
         let d: Vec<u8> = (0..100_000)
             .map(|i| if i % 17 < 8 { (i % 251) as u8 } else { b'A' })
             .collect();
-        for l in 1..=9 {
-            let e = compress_slice(&d, l).unwrap();
-            assert_eq!(decompress_slice(&e, d.len()).unwrap(), d)
-        }
+        let e = compress_slice(&d).unwrap();
+        assert_eq!(decompress_slice(&e, d.len()).unwrap(), d)
     }
     #[test]
     fn long_match_is_compact() {
         let d = vec![7; 200_000];
-        let e = compress_slice(&d, 5).unwrap();
+        let e = compress_slice(&d).unwrap();
         assert!(e.len() < 200);
         assert_eq!(decompress_slice(&e, d.len()).unwrap(), d)
     }
     #[test]
     fn predictor_helps_counter() {
         let d: Vec<u8> = (0..8192).map(|i| i as u8).collect();
-        let e = compress_slice(&d, 5).unwrap();
+        let e = compress_slice(&d).unwrap();
         assert_eq!(e[HEADER + 1], DELTA)
     }
 
@@ -1568,23 +1458,21 @@ mod tests {
                 state ^= state << 17;
                 *byte = (state >> 24) as u8;
             }
-            for level in 1..=9 {
-                let first = compress_slice(&data, level).unwrap();
-                let second = compress_slice(&data, level).unwrap();
-                assert_eq!(first, second, "non-deterministic output at level {level}");
-                assert_eq!(
-                    decompress_slice(&first, data.len()).unwrap(),
-                    data,
-                    "round-trip failure for {size} bytes at level {level}"
-                );
-            }
+            let first = compress_slice(&data).unwrap();
+            let second = compress_slice(&data).unwrap();
+            assert_eq!(first, second, "non-deterministic output for {size} bytes");
+            assert_eq!(
+                decompress_slice(&first, data.len()).unwrap(),
+                data,
+                "round-trip failure for {size} bytes"
+            );
         }
     }
 
     #[test]
     fn every_truncated_prefix_is_rejected() {
         let data = b"strict truncation vector ".repeat(2048);
-        let archive = compress_slice(&data, 6).unwrap();
+        let archive = compress_slice(&data).unwrap();
         for end in 0..archive.len() {
             assert!(
                 decompress_slice(&archive[..end], data.len()).is_err(),
@@ -1598,7 +1486,7 @@ mod tests {
         let data: Vec<u8> = (0..200_000)
             .map(|index| ((index * 17 + index / 97) & 0xff) as u8)
             .collect();
-        let archive = compress_slice(&data, 6).unwrap();
+        let archive = compress_slice(&data).unwrap();
         let payload_start = HEADER + BH;
         let payload_end = archive.len() - BH;
         for position in (payload_start..payload_end.saturating_sub(1)).step_by(31) {
@@ -1623,8 +1511,8 @@ mod tests {
                 .as_bytes(),
             );
         }
-        let archive = compress_slice(&data, 6).unwrap();
-        assert_eq!(&archive[..4], MAGIC_V7);
+        let archive = compress_slice(&data).unwrap();
+        assert_eq!(&archive[..4], MAGIC_V8);
         assert_eq!(archive[HEADER], PULSE_SPLIT);
         assert_eq!(decompress_slice(&archive, data.len()).unwrap(), data);
 
@@ -1642,7 +1530,7 @@ mod tests {
         for _ in 0..8 {
             data.extend_from_slice(&base);
         }
-        let archive = compress_slice(&data, 5).unwrap();
+        let archive = compress_slice(&data).unwrap();
         let analysis = analyze_archive(&archive).unwrap();
         assert!(analysis.reference_blocks > 0);
         assert!(analysis.referenced_bytes > data.len() as u64 * 3 / 4);
@@ -1654,7 +1542,7 @@ mod tests {
         let base = b"long range reference validation ".repeat(20_000);
         let mut data = base.clone();
         data.extend_from_slice(&base);
-        let mut archive = compress_slice(&data, 5).unwrap();
+        let mut archive = compress_slice(&data).unwrap();
         let mut cursor = HEADER;
         let mut block = 0u32;
         loop {

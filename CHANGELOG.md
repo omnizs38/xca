@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.11.0 — 2026-09-28
+
+- Introduced XCA8 with one unified adaptive compression profile.
+- Removed XCA levels from the CLI, Rust API, C API, stream options, and benchmark harness.
+- Replaced fast/dense level branches with one balanced 16-candidate hash-chain parser.
+- Added profile value zero for XCA8 while preserving XCA4–XCA7 decoding compatibility.
+- Updated `xca info` to report `profile: unified`.
+- Updated strict benchmarks to emit one `XCA Unified` result.
+
 ## 0.10.0 — 2026-09-28
 
 - Introduced the XCA7 long-range deduplication format.

@@ -1,4 +1,4 @@
-//! XCA7: an independently implemented adaptive lossless compression codec.
+//! XCA8: an independently implemented adaptive lossless compression codec.
 use std::fmt;
 mod codec;
 mod huffman;
@@ -22,7 +22,7 @@ pub enum Method {
 pub struct FrameInfo {
     pub version: u8,
     pub method: Method,
-    pub level: u8,
+    pub legacy_level: Option<u8>,
     pub original_size: usize,
     pub frame_size: usize,
     pub checksum: bool,
@@ -52,7 +52,7 @@ impl fmt::Display for Error {
             Self::BadMagic => write!(f, "invalid XCA magic"),
             Self::UnsupportedMethod(v) => write!(f, "unsupported XCA method {v}"),
             Self::InvalidLevel(v) => {
-                write!(f, "compression level must be between 1 and 9, got {v}")
+                write!(f, "invalid legacy compression level {v}")
             }
             Self::InvalidBlockSize(v) => write!(f, "invalid XCA block size {v}"),
             Self::Io(v) => write!(f, "I/O error: {v}"),
@@ -77,10 +77,7 @@ impl fmt::Display for Error {
 }
 impl std::error::Error for Error {}
 pub fn compress(input: &[u8]) -> Vec<u8> {
-    compress_with_level(input, 6).expect("valid built-in level")
-}
-pub fn compress_with_level(input: &[u8], level: u8) -> Result<Vec<u8>, Error> {
-    v4::compress_slice(input, level)
+    v4::compress_slice(input).expect("built-in unified profile is valid")
 }
 pub fn decompress(input: &[u8]) -> Result<Vec<u8>, Error> {
     decompress_with_limit(input, DEFAULT_OUTPUT_LIMIT)
@@ -97,11 +94,9 @@ mod c_api;
 mod tests {
     use super::*;
     #[test]
-    fn round_trip_all_levels() {
+    fn round_trip_unified_profile() {
         let d = b"XCA independent codec XCA independent codec";
-        for l in 1..=9 {
-            assert_eq!(decompress(&compress_with_level(d, l).unwrap()).unwrap(), d)
-        }
+        assert_eq!(decompress(&compress(d)).unwrap(), d)
     }
     #[test]
     fn compresses_runs() {

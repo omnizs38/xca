@@ -2,7 +2,7 @@ use std::{env, fs, process, time::Instant};
 
 fn usage(program: &str) {
     eprintln!(
-        "Usage:\n  {program} compress <input> <output> [level: 1-9]\n  {program} decompress <input> <output>\n  {program} check <input>\n  {program} info <input>\n  {program} analyze <archive>\n  {program} bench <input> [iterations] [level]"
+        "Usage:\n  {program} compress <input> <output>\n  {program} decompress <input> <output>\n  {program} check <input>\n  {program} info <input>\n  {program} analyze <archive>\n  {program} bench <input> [iterations]"
     );
 }
 
@@ -10,14 +10,9 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let args: Vec<String> = env::args().collect();
     let program = args.first().map(String::as_str).unwrap_or("xca");
     match args.get(1).map(String::as_str) {
-        Some("compress") if args.len() == 4 || args.len() == 5 => {
-            let level = args
-                .get(4)
-                .map(|value| value.parse())
-                .transpose()?
-                .unwrap_or(6);
+        Some("compress") if args.len() == 4 => {
             let input = fs::read(&args[2])?;
-            let output = xca::compress_with_level(&input, level)?;
+            let output = xca::compress(&input);
             fs::write(&args[3], &output)?;
             eprintln!(
                 "{} -> {} bytes ({:.2}%)",
@@ -42,7 +37,12 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             let info = xca::frame_info(&input)?;
             println!("version: XCA{}", info.version);
             println!("method: {:?}", info.method);
-            println!("level: {}", info.level);
+            if let Some(level) = info.legacy_level {
+                println!("profile: legacy");
+                println!("legacy level: {level}");
+            } else {
+                println!("profile: unified");
+            }
             println!("original size: {}", info.original_size);
             println!("frame size: {}", info.frame_size);
             println!("checksum: {}", info.checksum);
@@ -90,18 +90,17 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 a.distance_total as f64 / match_commands.max(1) as f64
             );
         }
-        Some("bench") if (3..=5).contains(&args.len()) => {
+        Some("bench") if (3..=4).contains(&args.len()) => {
             let input = fs::read(&args[2])?;
             let iterations: usize = args.get(3).map(|v| v.parse()).transpose()?.unwrap_or(7);
-            let level: u8 = args.get(4).map(|v| v.parse()).transpose()?.unwrap_or(5);
             if iterations == 0 {
                 return Err("iterations must be greater than zero".into());
             }
-            let archive = xca::compress_with_level(&input, level)?;
+            let archive = xca::compress(&input);
             let mut encode_times = Vec::with_capacity(iterations);
             for _ in 0..iterations {
                 let started = Instant::now();
-                let result = xca::compress_with_level(&input, level)?;
+                let result = xca::compress(&input);
                 encode_times.push(started.elapsed().as_secs_f64());
                 std::hint::black_box(result);
             }

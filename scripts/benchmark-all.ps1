@@ -154,15 +154,13 @@ foreach ($inputItem in $InputPath) {
     $corpus = $sourceItem.Name
     $safe = ($corpus -replace '[^A-Za-z0-9_.-]', '_')
 
-    foreach ($level in @(1, 5, 9)) {
-        $archive = Join-Path $work "$safe.xca-l$level.xca"
-        $restored = Join-Path $work "$safe.xca-l$level.restored"
-        $results += Measure-Codec $corpus "XCA level $level" $archive $restored {
-            & $xcaExe compress $source $archive $level 2>$null
-        } {
-            & $xcaExe decompress $archive $restored 2>$null
-        } $sourceSize $sourceHash
-    }
+    $archive = Join-Path $work "$safe.xca"
+    $restored = Join-Path $work "$safe.xca.restored"
+    $results += Measure-Codec $corpus "XCA Unified" $archive $restored {
+        & $xcaExe compress $source $archive 2>$null
+    } {
+        & $xcaExe decompress $archive $restored 2>$null
+    } $sourceSize $sourceHash
 
     if ($zstdExe) {
         foreach ($level in @(1, 3, 9)) {

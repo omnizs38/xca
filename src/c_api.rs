@@ -1,4 +1,4 @@
-use super::{compress_with_level, decompress};
+use super::{compress, decompress};
 use std::{ptr, slice};
 
 #[repr(C)]
@@ -29,29 +29,21 @@ fn return_buffer(bytes: Vec<u8>, output: *mut XcaBuffer) -> i32 {
 
 /// Compresses a byte buffer into an allocated XCA frame.
 ///
-/// Returns 0 on success, 1 for invalid pointers, and 2 for an invalid level.
+/// Returns 0 on success and 1 for invalid pointers.
 /// The returned buffer must be released with `xca_free`.
 ///
 /// # Safety
 /// `data` must reference `len` readable bytes when `len` is non-zero, and
 /// `output` must reference writable memory for one `XcaBuffer`.
 #[no_mangle]
-pub unsafe extern "C" fn xca_compress(
-    data: *const u8,
-    len: usize,
-    level: u8,
-    output: *mut XcaBuffer,
-) -> i32 {
+pub unsafe extern "C" fn xca_compress(data: *const u8, len: usize, output: *mut XcaBuffer) -> i32 {
     if output.is_null() {
         return 1;
     }
     let Some(input) = input_slice(data, len) else {
         return 1;
     };
-    match compress_with_level(input, level) {
-        Ok(bytes) => return_buffer(bytes, output),
-        Err(_) => 2,
-    }
+    return_buffer(compress(input), output)
 }
 
 /// Decompresses an XCA frame into an allocated byte buffer.

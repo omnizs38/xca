@@ -14,7 +14,7 @@ typedef struct XcaBuffer {
 } XcaBuffer;
 
 /* Returns 0 on success. The result must be released with xca_free. */
-int32_t xca_compress(const uint8_t *data, size_t len, uint8_t level, XcaBuffer *output);
+int32_t xca_compress(const uint8_t *data, size_t len, XcaBuffer *output);
 int32_t xca_decompress(const uint8_t *data, size_t len, XcaBuffer *output);
 void xca_free(uint8_t *data, size_t len);
 
