@@ -2,7 +2,7 @@ use std::{env, fs, process, time::Instant};
 
 fn usage(program: &str) {
     eprintln!(
-        "Usage:\n  {program} compress <input> <output> [level: 1-9]\n  {program} decompress <input> <output>\n  {program} check <input>\n  {program} info <input>\n  {program} bench <input> [iterations] [level]"
+        "Usage:\n  {program} compress <input> <output> [level: 1-9]\n  {program} decompress <input> <output>\n  {program} check <input>\n  {program} info <input>\n  {program} analyze <archive>\n  {program} bench <input> [iterations] [level]"
     );
 }
 
@@ -46,6 +46,41 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("original size: {}", info.original_size);
             println!("frame size: {}", info.frame_size);
             println!("checksum: {}", info.checksum);
+        }
+        Some("analyze") if args.len() == 3 => {
+            let archive = fs::read(&args[2])?;
+            let a = xca::analyze_archive(&archive)?;
+            let match_commands = a.short_match_commands + a.long_match_commands;
+            println!("original_bytes: {}", a.original_bytes);
+            println!("archive_bytes: {}", a.archive_bytes);
+            println!("blocks: {}", a.blocks);
+            println!("stored_blocks: {}", a.stored_blocks);
+            println!("pulse_blocks: {}", a.pulse_blocks);
+            println!("predictor_none_blocks: {}", a.predictor_none_blocks);
+            println!("predictor_delta_blocks: {}", a.predictor_delta_blocks);
+            println!("predictor_xor_blocks: {}", a.predictor_xor_blocks);
+            println!("literal_commands: {}", a.literal_commands);
+            println!("literal_bytes: {}", a.literal_bytes);
+            println!(
+                "literal_percent: {:.4}",
+                a.literal_bytes as f64 * 100.0 / a.original_bytes.max(1) as f64
+            );
+            println!("match_commands: {}", match_commands);
+            println!("short_match_commands: {}", a.short_match_commands);
+            println!("long_match_commands: {}", a.long_match_commands);
+            println!("matched_bytes: {}", a.matched_bytes);
+            println!(
+                "matched_percent: {:.4}",
+                a.matched_bytes as f64 * 100.0 / a.original_bytes.max(1) as f64
+            );
+            println!(
+                "average_match_length: {:.2}",
+                a.matched_bytes as f64 / match_commands.max(1) as f64
+            );
+            println!(
+                "average_match_distance: {:.2}",
+                a.distance_total as f64 / match_commands.max(1) as f64
+            );
         }
         Some("bench") if (3..=5).contains(&args.len()) => {
             let input = fs::read(&args[2])?;

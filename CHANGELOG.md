@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.1 — 2026-09-28
+
+- Added `xca analyze <archive>` for token-level diagnostics.
+- Reports stored/Pulse blocks, predictor usage, literal coverage, short/long match counts, matched coverage, and average match length/distance.
+- Added strict validation while analyzing untrusted archives.
+
 ## 0.7.0 — 2026-09-28
 
 - Added parallel block decompression for in-memory callers and the CLI.

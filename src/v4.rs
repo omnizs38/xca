@@ -37,6 +37,23 @@ pub struct StreamStats {
     pub output_bytes: u64,
     pub blocks: u32,
 }
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct ArchiveAnalysis {
+    pub original_bytes: u64,
+    pub archive_bytes: u64,
+    pub blocks: u32,
+    pub stored_blocks: u32,
+    pub pulse_blocks: u32,
+    pub predictor_none_blocks: u32,
+    pub predictor_delta_blocks: u32,
+    pub predictor_xor_blocks: u32,
+    pub literal_commands: u64,
+    pub literal_bytes: u64,
+    pub short_match_commands: u64,
+    pub long_match_commands: u64,
+    pub matched_bytes: u64,
+    pub distance_total: u64,
+}
 struct FastWorkspace {
     positions: Vec<u32>,
     stamps: Vec<u32>,
@@ -396,6 +413,97 @@ pub fn decompress_stream<R: Read, W: Write>(
         st.blocks = st.blocks.checked_add(1).ok_or(Error::InputTooLarge)?
     }
     Ok(st)
+}
+pub fn analyze_archive(input: &[u8]) -> Result<ArchiveAnalysis, Error> {
+    if input.len() < HEADER || &input[..4] != MAGIC {
+        return Err(Error::BadMagic);
+    }
+    let mut result = ArchiveAnalysis {
+        archive_bytes: input.len() as u64,
+        ..ArchiveAnalysis::default()
+    };
+    let mut cursor = HEADER;
+    loop {
+        if cursor + BH > input.len() {
+            return Err(Error::Truncated);
+        }
+        let header = &input[cursor..cursor + BH];
+        cursor += BH;
+        let method = header[0];
+        let predictor = header[1];
+        let original = u32::from_le_bytes(header[2..6].try_into().unwrap()) as usize;
+        let packed = u32::from_le_bytes(header[6..10].try_into().unwrap()) as usize;
+        if method == END {
+            if original != 0 || packed != 0 || cursor != input.len() {
+                return Err(Error::TrailingData);
+            }
+            break;
+        }
+        let end = cursor.checked_add(packed).ok_or(Error::InputTooLarge)?;
+        if end > input.len() {
+            return Err(Error::Truncated);
+        }
+        result.blocks += 1;
+        result.original_bytes += original as u64;
+        match predictor {
+            NONE_P => result.predictor_none_blocks += 1,
+            DELTA => result.predictor_delta_blocks += 1,
+            XOR => result.predictor_xor_blocks += 1,
+            value => return Err(Error::UnsupportedMethod(value)),
+        }
+        if method == STORED {
+            result.stored_blocks += 1;
+            result.literal_commands += 1;
+            result.literal_bytes += original as u64;
+        } else if method == PULSE {
+            result.pulse_blocks += 1;
+            let payload = &input[cursor..end];
+            let mut at = 0;
+            let mut produced = 0usize;
+            while produced < original {
+                let tag = *payload.get(at).ok_or(Error::Truncated)?;
+                at += 1;
+                if tag < 0x80 {
+                    let length = tag as usize + 1;
+                    if at + length > payload.len() || produced + length > original {
+                        return Err(Error::Truncated);
+                    }
+                    result.literal_commands += 1;
+                    result.literal_bytes += length as u64;
+                    at += length;
+                    produced += length;
+                } else {
+                    let length = if tag < 0xc0 {
+                        result.short_match_commands += 1;
+                        (tag as usize & 0x3f) + 4
+                    } else if tag == 0xc0 {
+                        result.long_match_commands += 1;
+                        get_var(payload, &mut at)? as usize
+                    } else {
+                        return Err(Error::InvalidMatch);
+                    };
+                    if at + 2 > payload.len() || produced + length > original {
+                        return Err(Error::InvalidMatch);
+                    }
+                    let distance = u16::from_le_bytes([payload[at], payload[at + 1]]) as usize;
+                    at += 2;
+                    if distance == 0 || distance > produced {
+                        return Err(Error::InvalidMatch);
+                    }
+                    result.matched_bytes += length as u64;
+                    result.distance_total += distance as u64;
+                    produced += length;
+                }
+            }
+            if at != payload.len() {
+                return Err(Error::TrailingData);
+            }
+        } else {
+            return Err(Error::UnsupportedMethod(method));
+        }
+        cursor = end;
+    }
+    Ok(result)
 }
 pub fn frame_info(i: &[u8]) -> Result<FrameInfo, Error> {
     if i.len() < HEADER || &i[..4] != MAGIC {

@@ -1,11 +1,12 @@
 # XCA — eXtended Compression Algorithm
 
-XCA 0.7 uses the XCA4 Pulse format and is an independently implemented, dependency-free lossless compression library and CLI written in Rust.
+XCA 0.7.1 uses the XCA4 Pulse format and is an independently implemented, dependency-free lossless compression library and CLI written in Rust.
 
 > XCA4 is a working experimental codec. It is not yet proven to beat LZ4 or LZMA universally; performance claims require reproducible corpus benchmarks.
 
-## XCA 0.7 highlights
+## XCA 0.7.1 highlights
 
+- `xca analyze` reports literal/match coverage, predictor usage, match lengths, and distances;
 - parallel in-memory block decompression with deterministic output order;
 - built-in `xca bench` command for CPU-only compression and decompression measurements;
 - table-driven CRC-32 for substantially faster compression and decompression;
@@ -49,6 +50,7 @@ xca compress input.bin output.xca 5
 xca decompress output.xca restored.bin
 xca check output.xca
 xca info output.xca
+xca analyze output.xca
 xca bench input.bin 7 5
 ```
 
