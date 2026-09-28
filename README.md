@@ -1,10 +1,10 @@
 # XCA — eXtended Compression Algorithm
 
-XCA 0.9.0 is an independently implemented, dependency-free lossless compression library and CLI written in Rust. It writes XCA6 and decodes XCA4, XCA5, and XCA6 archives.
+XCA 0.9.1 is an independently implemented, dependency-free lossless compression library and CLI written in Rust. It writes XCA6 and decodes XCA4, XCA5, and XCA6 archives.
 
 > XCA is experimental. No codec wins every corpus and metric. Use the included strict cross-engine benchmark instead of relying on universal claims.
 
-## XCA 0.9.0 highlights
+## XCA 0.9.1 highlights
 
 - new XCA6 Split Pulse backend;
 - independent streams for command tags, literals, long lengths, and distances;

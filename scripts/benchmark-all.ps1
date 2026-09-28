@@ -23,9 +23,21 @@ function Resolve-Executable {
 
 function Invoke-Checked {
     param([scriptblock]$Command, [string]$Label)
-    & $Command
-    if ($LASTEXITCODE -ne 0) {
-        throw "$Label failed with exit code $LASTEXITCODE"
+    # Windows PowerShell turns native stderr into an ErrorRecord under Stop.
+    # Codecs legitimately print progress there, so judge them by exit status
+    # and restore strict PowerShell error handling immediately afterward.
+    $previousPreference = $ErrorActionPreference
+    $exitCode = -1
+    try {
+        $ErrorActionPreference = "Continue"
+        & $Command
+        $exitCode = $LASTEXITCODE
+    }
+    finally {
+        $ErrorActionPreference = $previousPreference
+    }
+    if ($exitCode -ne 0) {
+        throw "$Label failed with exit code $exitCode"
     }
 }
 

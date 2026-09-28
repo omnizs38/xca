@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.9.1 — 2026-09-28
+
+- Fixed `benchmark-all.ps1` under Windows PowerShell when native codecs write progress to stderr while strict error handling is enabled.
+- Native codec success is now determined by exit status; strict PowerShell errors remain enabled for the rest of the harness.
+
 ## 0.9.0 — 2026-09-28
 
 - Introduced the XCA6 Split Pulse format.
