@@ -1,12 +1,15 @@
 # XCA — eXtended Compression Algorithm
 
-XCA4 Pulse is an independently implemented, dependency-free lossless compression library and CLI written in Rust.
+XCA 0.5 uses the XCA4 Pulse format and is an independently implemented, dependency-free lossless compression library and CLI written in Rust.
 
 > XCA4 is a working experimental codec. It is not yet proven to beat LZ4 or LZMA universally; performance claims require reproducible corpus benchmarks.
 
-## XCA4 highlights
+## XCA 0.5 highlights
 
-- new Pulse literal-run, short-match, and long-match command stream;
+- parallel in-memory block compression using all available CPU threads;
+- dedicated direct-hash Turbo path for levels 1–3;
+- faster overlap-copy decoding using geometric slice expansion;
+- Pulse literal-run, short-match, and long-match command stream;
 - matches up to 65,535 bytes instead of XCA3's 255-byte ceiling;
 - sampled predictor sketch chooses raw, delta, or XOR mode without fully compressing every candidate;
 - one dictionary pass per block, with sparse history updates at fast levels;
@@ -41,6 +44,10 @@ xca decompress output.xca restored.bin
 xca check output.xca
 xca info output.xca
 ```
+
+## Cleanup
+
+On Windows, preview and remove generated benchmark artifacts with `powershell -ExecutionPolicy Bypass -File scripts/cleanup-tests.ps1`. Add `-Force` to skip confirmation and `-DeleteBuild` to also run `cargo clean`.
 
 ## Current priorities
 

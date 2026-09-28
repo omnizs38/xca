@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.5.0 — 2026-09-28
+
+- Added parallel in-memory block compression with deterministic output ordering.
+- Added a direct-hash Turbo encoder for levels 1–3.
+- Skipped predictor analysis on the fastest levels.
+- Accelerated overlapping match decoding with slice expansion.
+- Preserved the XCA4 on-disk format and streaming compatibility.
+- Added a safe PowerShell cleanup utility for benchmark artifacts.
+- Retained strict Clippy, round-trip, corruption, and resource-limit checks.
+
 ## 0.4.0 — 2026-09-27
 
 - Introduced XCA4 Pulse, a new project-original command stream.
