@@ -1,6 +1,7 @@
 //! XCA8: an independently implemented adaptive lossless compression codec.
-use std::{fmt, fs, path::Path};
+use std::{fmt, path::Path};
 mod codec;
+mod file_io;
 mod huffman;
 mod v4;
 pub(crate) use codec::crc32;
@@ -91,18 +92,31 @@ pub fn decompress(input: &[u8]) -> Result<Vec<u8>, Error> {
 pub fn decompress_with_limit(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
     v4::decompress_slice(input, limit)
 }
+pub fn decompress_into(input: &[u8], output: &mut [u8]) -> Result<usize, Error> {
+    decompress_into_with_limit(input, output, DEFAULT_OUTPUT_LIMIT)
+}
+pub fn decompress_into_with_limit(
+    input: &[u8],
+    output: &mut [u8],
+    limit: usize,
+) -> Result<usize, Error> {
+    v4::decompress_into_slice(input, output, limit)
+}
 pub fn frame_info(input: &[u8]) -> Result<FrameInfo, Error> {
     v4::frame_info(input)
+}
+pub fn check(input: &[u8]) -> Result<usize, Error> {
+    v4::verify_slice(input, DEFAULT_OUTPUT_LIMIT)
 }
 pub fn compress_file(
     input_path: impl AsRef<Path>,
     output_path: impl AsRef<Path>,
 ) -> Result<FileStats, Error> {
-    let input = fs::read(input_path).map_err(|error| Error::Io(error.to_string()))?;
-    let output = compress(&input);
-    fs::write(output_path, &output).map_err(|error| Error::Io(error.to_string()))?;
+    let input = file_io::ReadMap::open(input_path.as_ref())?;
+    let output = compress(input.as_slice());
+    file_io::write_all(output_path.as_ref(), &output)?;
     Ok(FileStats {
-        input_bytes: input.len() as u64,
+        input_bytes: input.as_slice().len() as u64,
         output_bytes: output.len() as u64,
     })
 }
@@ -110,19 +124,43 @@ pub fn decompress_file(
     input_path: impl AsRef<Path>,
     output_path: impl AsRef<Path>,
 ) -> Result<FileStats, Error> {
-    let input = fs::read(input_path).map_err(|error| Error::Io(error.to_string()))?;
-    let output = decompress(&input)?;
-    fs::write(output_path, &output).map_err(|error| Error::Io(error.to_string()))?;
-    Ok(FileStats {
-        input_bytes: input.len() as u64,
-        output_bytes: output.len() as u64,
-    })
+    decompress_file_with_limit(input_path, output_path, DEFAULT_OUTPUT_LIMIT)
+}
+pub fn decompress_file_with_limit(
+    input_path: impl AsRef<Path>,
+    output_path: impl AsRef<Path>,
+    limit: usize,
+) -> Result<FileStats, Error> {
+    let output_path = output_path.as_ref();
+    let input = file_io::ReadMap::open(input_path.as_ref())?;
+    let output_len = frame_info(input.as_slice())?.original_size;
+    if output_len > limit {
+        return Err(Error::OutputLimitExceeded {
+            requested: output_len,
+            limit,
+        });
+    }
+    let result = {
+        let mut output = file_io::WriteMap::create(output_path, output_len)?;
+        decompress_into_with_limit(input.as_slice(), output.as_mut_slice(), limit)
+    };
+    match result {
+        Ok(_) => Ok(FileStats {
+            input_bytes: input.as_slice().len() as u64,
+            output_bytes: output_len as u64,
+        }),
+        Err(error) => {
+            file_io::remove_failed_output(output_path);
+            Err(error)
+        }
+    }
 }
 #[cfg(feature = "c-api")]
 mod c_api;
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
     use std::time::{SystemTime, UNIX_EPOCH};
     #[test]
     fn round_trip_unified_profile() {
@@ -139,7 +177,8 @@ mod tests {
         let mut d = compress(&vec![7; 4096]);
         let i = d.len() - 1;
         d[i] ^= 1;
-        assert!(decompress(&d).is_err())
+        assert!(decompress(&d).is_err());
+        assert!(check(&d).is_err());
     }
     #[test]
     fn enforces_limit() {
@@ -148,6 +187,19 @@ mod tests {
             decompress_with_limit(&d, 100),
             Err(Error::OutputLimitExceeded { .. })
         ))
+    }
+    #[test]
+    fn decompresses_into_caller_buffer() {
+        let data = b"caller-owned output ".repeat(8192);
+        let archive = compress(&data);
+        let mut output = vec![0; data.len()];
+        assert_eq!(decompress_into(&archive, &mut output).unwrap(), data.len());
+        assert_eq!(output, data);
+        let mut short = vec![0; data.len() - 1];
+        assert!(matches!(
+            decompress_into(&archive, &mut short),
+            Err(Error::LengthMismatch { .. })
+        ));
     }
     #[test]
     fn file_helpers_round_trip() {
@@ -168,6 +220,19 @@ mod tests {
         assert_eq!(compressed.input_bytes, data.len() as u64);
         assert_eq!(decompressed.output_bytes, data.len() as u64);
         assert_eq!(fs::read(&restored).unwrap(), data);
+
+        let mut damaged = fs::read(&archive).unwrap();
+        let middle = damaged.len() / 2;
+        damaged[middle] ^= 1;
+        fs::write(&archive, damaged).unwrap();
+        fs::remove_file(&restored).unwrap();
+        assert!(decompress_file(&archive, &restored).is_err());
+        assert!(!restored.exists());
+
+        fs::write(&source, []).unwrap();
+        compress_file(&source, &archive).unwrap();
+        decompress_file(&archive, &restored).unwrap();
+        assert!(fs::read(&restored).unwrap().is_empty());
 
         for path in [source, archive, restored] {
             let _ = fs::remove_file(path);

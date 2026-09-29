@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.12.0 — 2026-09-28
+
+- Added dependency-free memory-mapped file input and output on Windows and Unix.
+- Added Rust and C APIs for decoding directly into caller-owned memory.
+- Updated the C++ and Python bindings to use the direct-output decode path.
+- Changed CLI decompression to assemble blocks directly into the mapped destination file, eliminating the full restored-buffer allocation and file-write copy.
+- Changed CLI compression to read directly from mapped input and preallocate the archive file.
+- Added validation-only `check` that does not assemble the complete restored output.
+- Enabled full LTO and native-CPU strict benchmark builds.
+- Added split-target release scripts that eliminate the Cargo MSVC PDB filename warning without renaming the public `xca` library or executable.
+- Added direct-output correctness and size-mismatch coverage, bringing the suite to 20 tests.
+- Improved local 78.1 MiB end-to-end decompression from 961 to 2,442 MiB/s and compression from 338 to 429 MiB/s while preserving identical archives.
+
 ## 0.11.2 — 2026-09-28
 
 - Added adaptive parallel final-output assembly for large reference-heavy archives while retaining a low-overhead sequential path below 64 MiB.

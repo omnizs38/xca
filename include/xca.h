@@ -19,6 +19,8 @@ const char *xca_error_string(int32_t code);
 /* Returns 0 on success. The result must be released with xca_free. */
 int32_t xca_compress(const uint8_t *data, size_t len, XcaBuffer *output);
 int32_t xca_decompress(const uint8_t *data, size_t len, XcaBuffer *output);
+int32_t xca_decompressed_size(const uint8_t *data, size_t len, size_t *output_len);
+int32_t xca_decompress_into(const uint8_t *data, size_t len, uint8_t *output, size_t output_len);
 void xca_free(uint8_t *data, size_t len);
 void xca_buffer_free(XcaBuffer *buffer);
 

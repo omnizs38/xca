@@ -19,7 +19,7 @@ try {
     cargo test --all-targets --all-features
     if ($LASTEXITCODE -ne 0) { throw "cargo test failed" }
 
-    cargo build --release --all-features
+    & (Join-Path $PSScriptRoot "build-release.ps1") -Native
     if ($LASTEXITCODE -ne 0) { throw "release build failed" }
 
     if (-not $SkipBenchmark) {

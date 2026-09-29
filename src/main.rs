@@ -11,26 +11,22 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     let program = args.first().map(String::as_str).unwrap_or("xca");
     match args.get(1).map(String::as_str) {
         Some("compress") if args.len() == 4 => {
-            let input = fs::read(&args[2])?;
-            let output = xca::compress(&input);
-            fs::write(&args[3], &output)?;
+            let stats = xca::compress_file(&args[2], &args[3])?;
             eprintln!(
                 "{} -> {} bytes ({:.2}%)",
-                input.len(),
-                output.len(),
-                ratio(input.len(), output.len())
+                stats.input_bytes,
+                stats.output_bytes,
+                ratio(stats.input_bytes as usize, stats.output_bytes as usize)
             );
         }
         Some("decompress") if args.len() == 4 => {
-            let input = fs::read(&args[2])?;
-            let output = xca::decompress(&input)?;
-            fs::write(&args[3], &output)?;
-            eprintln!("{} -> {} bytes", input.len(), output.len());
+            let stats = xca::decompress_file(&args[2], &args[3])?;
+            eprintln!("{} -> {} bytes", stats.input_bytes, stats.output_bytes);
         }
         Some("check") if args.len() == 3 => {
             let input = fs::read(&args[2])?;
-            let output = xca::decompress(&input)?;
-            eprintln!("valid XCA stream; decoded size: {} bytes", output.len());
+            let decoded_size = xca::check(&input)?;
+            eprintln!("valid XCA stream; decoded size: {decoded_size} bytes");
         }
         Some("info") if args.len() == 3 => {
             let input = fs::read(&args[2])?;

@@ -211,6 +211,30 @@ fn decode_block(block: BlockDescriptor<'_>) -> Result<Vec<u8>, Error> {
     Ok(decoded)
 }
 pub fn decompress_slice(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
+    decode_frame(input, limit, None, true)?.ok_or(Error::InvalidMatch)
+}
+
+pub fn decompress_into_slice(
+    input: &[u8],
+    output: &mut [u8],
+    limit: usize,
+) -> Result<usize, Error> {
+    decode_frame(input, limit, Some(output), true)?;
+    Ok(output.len())
+}
+
+pub fn verify_slice(input: &[u8], limit: usize) -> Result<usize, Error> {
+    let total = frame_info(input)?.original_size;
+    decode_frame(input, limit, None, false)?;
+    Ok(total)
+}
+
+fn decode_frame(
+    input: &[u8],
+    limit: usize,
+    destination: Option<&mut [u8]>,
+    assemble: bool,
+) -> Result<Option<Vec<u8>>, Error> {
     if input.len() < HEADER
         || &input[..4] != MAGIC_V4
             && &input[..4] != MAGIC_V5
@@ -280,6 +304,14 @@ pub fn decompress_slice(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
         cursor = end;
     }
     let count = descriptors.len();
+    if let Some(output) = destination.as_ref() {
+        if output.len() != total {
+            return Err(Error::LengthMismatch {
+                expected: total,
+                actual: output.len(),
+            });
+        }
+    }
     let workers = thread::available_parallelism()
         .map_or(1, |n| n.get())
         .min(count.max(1));
@@ -349,6 +381,15 @@ pub fn decompress_slice(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
         );
     }
 
+    if !assemble {
+        return Ok(None);
+    }
+
+    if let Some(output) = destination {
+        assemble_output(output, workers, &roots, &offsets, &decoded);
+        return Ok(None);
+    }
+
     const PARALLEL_ASSEMBLY_THRESHOLD: usize = 64 * 1024 * 1024;
     if total < PARALLEL_ASSEMBLY_THRESHOLD || workers == 1 {
         let mut output = Vec::with_capacity(total);
@@ -358,12 +399,35 @@ pub fn decompress_slice(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
                 .expect("reference root must be independently decoded");
             output.extend_from_slice(source);
         }
-        return Ok(output);
+        return Ok(Some(output));
     }
 
     let mut output = vec![0u8; total];
+    assemble_output(&mut output, workers, &roots, &offsets, &decoded);
+    Ok(Some(output))
+}
+
+fn assemble_output(
+    output: &mut [u8],
+    workers: usize,
+    roots: &[usize],
+    offsets: &[usize],
+    decoded: &[Option<Vec<u8>>],
+) {
+    const PARALLEL_ASSEMBLY_THRESHOLD: usize = 64 * 1024 * 1024;
+    let count = roots.len();
+    if output.len() < PARALLEL_ASSEMBLY_THRESHOLD || workers == 1 {
+        for index in 0..count {
+            let source = decoded[roots[index]]
+                .as_ref()
+                .expect("reference root must be independently decoded");
+            output[offsets[index]..offsets[index + 1]].copy_from_slice(source);
+        }
+        return;
+    }
+
     thread::scope(|scope| {
-        let mut remaining = output.as_mut_slice();
+        let mut remaining = &mut *output;
         let mut first = 0usize;
         for worker in 0..workers {
             let last = count * (worker + 1) / workers;
@@ -387,7 +451,6 @@ pub fn decompress_slice(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
             first = last;
         }
     });
-    Ok(output)
 }
 
 fn plan_blocks(input: &[u8], block_size: usize) -> (Vec<(usize, usize)>, Vec<Option<usize>>) {

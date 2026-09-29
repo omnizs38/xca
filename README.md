@@ -1,6 +1,6 @@
 # XCA — eXtended Compression Algorithm
 
-XCA 0.11.2 is an independently implemented, dependency-free lossless compression library and CLI written in Rust. It writes XCA8 and decodes XCA4 through XCA8.
+XCA 0.12.0 is an independently implemented, dependency-free lossless compression library and CLI written in Rust. It writes XCA8 and decodes XCA4 through XCA8.
 
 XCA8 has one unified adaptive compression profile. There are no user-selectable XCA levels.
 
@@ -18,7 +18,7 @@ For every input, XCA automatically applies the same decision pipeline:
 
 This removes tuning ambiguity: the same `compress` operation is used for small files, binaries, logs, snapshots, and repeated corpora.
 
-## XCA 0.11.2 highlights
+## XCA 0.12.0 highlights
 
 - new XCA8 unified-profile format;
 - removed levels from the Rust API, C API, CLI, benchmark harness, and stream options;
@@ -27,9 +27,14 @@ This removes tuning ambiguity: the same `compress` operation is used for small f
 - adaptive fixed-block fallback when dedup coverage is below 1%;
 - XCA6 Split Pulse for unique blocks;
 - backward decoding compatibility with XCA4–XCA7;
-- adaptive parallel output assembly for large reference-heavy archives;
+- direct memory-mapped file input and decompression output on Windows and Unix;
+- allocation-free `decompress_into` for caller-owned memory;
+- adaptive parallel output assembly directly into files and external buffers;
+- validation-only `check` without constructing the complete restored output;
 - simple Rust file helpers plus C, C++, and Python integration layers;
-- 19 strict adversarial, determinism, reference, corruption, file, and boundary tests;
+- native-CPU strict release builds with full LTO;
+- collision-free split library/CLI build scripts for MSVC;
+- 20 strict adversarial, determinism, reference, corruption, file, and boundary tests;
 - verified XCA/Zstandard/LZ4/LZMA2 PowerShell benchmark suite;
 - no third-party runtime or compression dependencies.
 
@@ -45,6 +50,9 @@ xca = { git = "https://github.com/omnizs38/xca", branch = "main" }
 ```rust
 let compressed = xca::compress(b"data data data");
 let restored = xca::decompress(&compressed)?;
+
+let mut caller_owned = vec![0; b"data data data".len()];
+xca::decompress_into(&compressed, &mut caller_owned)?;
 
 xca::compress_file("input.bin", "output.xca")?;
 xca::decompress_file("output.xca", "restored.bin")?;
@@ -63,14 +71,17 @@ See [INTEGRATION.md](INTEGRATION.md) for complete Rust, C, C++, Python, generic 
 ## CLI
 
 ```bash
-cargo build --release
-xca compress input.bin output.xca
-xca decompress output.xca restored.bin
-xca check output.xca
-xca info output.xca
-xca analyze output.xca
-xca bench input.bin 7
+./scripts/build-release.sh
+./target/release/xca compress input.bin output.xca
+./target/release/xca decompress output.xca restored.bin
+./target/release/xca check output.xca
+./target/release/xca info output.xca
+./target/release/xca analyze output.xca
+./target/release/xca bench input.bin 7
 ```
+
+On Windows, use `powershell -ExecutionPolicy Bypass -File .\scripts\build-release.ps1`.
+Add `-Native` for a machine-optimized binary. Building library and CLI targets separately also avoids Cargo's same-name MSVC PDB collision.
 
 `xca info` reports `profile: unified`. `xca analyze` reports Split Pulse and long-range reference coverage.
 
@@ -101,7 +112,7 @@ Add `-DeleteBuild` to also run `cargo clean`.
 1. improve entropy table reuse;
 2. improve CDC speed on high-entropy inputs;
 3. add permanent binary compatibility vectors and fuzzing;
-4. improve low-latency parsing without adding user-facing modes;
+4. evaluate direct compressed-output assembly;
 5. evaluate a bounded ANS backend selected automatically per stream.
 
 ## License

@@ -43,6 +43,19 @@ _lib.xca_compress.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, c
 _lib.xca_compress.restype = ctypes.c_int32
 _lib.xca_decompress.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.POINTER(_Buffer)]
 _lib.xca_decompress.restype = ctypes.c_int32
+_lib.xca_decompressed_size.argtypes = [
+    ctypes.POINTER(ctypes.c_uint8),
+    ctypes.c_size_t,
+    ctypes.POINTER(ctypes.c_size_t),
+]
+_lib.xca_decompressed_size.restype = ctypes.c_int32
+_lib.xca_decompress_into.argtypes = [
+    ctypes.POINTER(ctypes.c_uint8),
+    ctypes.c_size_t,
+    ctypes.POINTER(ctypes.c_uint8),
+    ctypes.c_size_t,
+]
+_lib.xca_decompress_into.restype = ctypes.c_int32
 _lib.xca_buffer_free.argtypes = [ctypes.POINTER(_Buffer)]
 
 
@@ -67,4 +80,13 @@ def compress(data: bytes) -> bytes:
 
 
 def decompress(data: bytes) -> bytes:
-    return _call(_lib.xca_decompress, data)
+    source = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
+    size = ctypes.c_size_t()
+    code = _lib.xca_decompressed_size(source, len(data), ctypes.byref(size))
+    if code != 0:
+        raise RuntimeError(_lib.xca_error_string(code).decode("utf-8"))
+    output = (ctypes.c_uint8 * size.value)()
+    code = _lib.xca_decompress_into(source, len(data), output, size.value)
+    if code != 0:
+        raise RuntimeError(_lib.xca_error_string(code).decode("utf-8"))
+    return bytes(output)

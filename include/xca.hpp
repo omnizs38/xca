@@ -21,11 +21,12 @@ inline std::vector<std::uint8_t> compress(const std::uint8_t *data, std::size_t 
 }
 
 inline std::vector<std::uint8_t> decompress(const std::uint8_t *data, std::size_t size) {
-    XcaBuffer output{nullptr, 0};
-    const auto code = xca_decompress(data, size, &output);
+    std::size_t output_size = 0;
+    auto code = xca_decompressed_size(data, size, &output_size);
     if (code != 0) throw std::runtime_error(xca_error_string(code));
-    std::vector<std::uint8_t> result(output.data, output.data + output.len);
-    xca_buffer_free(&output);
+    std::vector<std::uint8_t> result(output_size);
+    code = xca_decompress_into(data, size, result.data(), result.size());
+    if (code != 0) throw std::runtime_error(xca_error_string(code));
     return result;
 }
 
