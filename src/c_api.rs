@@ -214,8 +214,7 @@ mod tests {
         output.data = ptr::dangling_mut();
         output.len = usize::MAX;
         let invalid = b"not an XCA archive";
-        let code =
-            unsafe { xca_decompress(invalid.as_ptr(), invalid.len(), &mut output) };
+        let code = unsafe { xca_decompress(invalid.as_ptr(), invalid.len(), &mut output) };
         assert_eq!(code, 3);
         assert!(output.data.is_null());
         assert_eq!(output.len, 0);
