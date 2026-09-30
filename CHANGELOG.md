@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.12.1 — 2026-09-30
+
+- Fixed C API failure paths so output buffers are always cleared and can be safely released after an error.
+- Fixed in-place file decompression corrupting its mapped input by rejecting input and output paths that resolve to the same file.
+- Added regression coverage for failed C API calls and same-file decompression.
+
 ## 0.12.0 — 2026-09-28
 
 - Added dependency-free memory-mapped file input and output on Windows and Unix.

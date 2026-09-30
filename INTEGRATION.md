@@ -118,4 +118,4 @@ The CLI returns a non-zero process status on failure and can be embedded in scri
 
 ## Compatibility
 
-XCA 0.12.0 writes XCA8. The decoder accepts XCA4 through XCA8. New applications should treat the format as experimental until a stable 1.0 specification is published.
+XCA 0.12.1 writes XCA8. The decoder accepts XCA4 through XCA8. New applications should treat the format as experimental until a stable 1.0 specification is published.
