@@ -131,8 +131,14 @@ pub fn decompress_file_with_limit(
     output_path: impl AsRef<Path>,
     limit: usize,
 ) -> Result<FileStats, Error> {
+    let input_path = input_path.as_ref();
     let output_path = output_path.as_ref();
-    let input = file_io::ReadMap::open(input_path.as_ref())?;
+    if file_io::paths_refer_to_same_file(input_path, output_path)? {
+        return Err(Error::Io(
+            "input and output paths refer to the same file".to_owned(),
+        ));
+    }
+    let input = file_io::ReadMap::open(input_path)?;
     let output_len = frame_info(input.as_slice())?.original_size;
     if output_len > limit {
         return Err(Error::OutputLimitExceeded {
@@ -233,6 +239,10 @@ mod tests {
         compress_file(&source, &archive).unwrap();
         decompress_file(&archive, &restored).unwrap();
         assert!(fs::read(&restored).unwrap().is_empty());
+
+        let original_archive = fs::read(&archive).unwrap();
+        assert!(decompress_file(&archive, &archive).is_err());
+        assert_eq!(fs::read(&archive).unwrap(), original_archive);
 
         for path in [source, archive, restored] {
             let _ = fs::remove_file(path);

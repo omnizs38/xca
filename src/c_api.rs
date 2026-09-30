@@ -44,6 +44,19 @@ fn return_buffer(bytes: Vec<u8>, output: *mut XcaBuffer) -> i32 {
     0
 }
 
+fn clear_buffer(output: *mut XcaBuffer) {
+    // SAFETY: Callers check that `output` is non-null before using this helper.
+    unsafe {
+        ptr::write(
+            output,
+            XcaBuffer {
+                data: ptr::null_mut(),
+                len: 0,
+            },
+        );
+    }
+}
+
 /// Compresses a byte buffer into an allocated XCA frame.
 ///
 /// Returns 0 on success and 1 for invalid pointers.
@@ -57,6 +70,7 @@ pub unsafe extern "C" fn xca_compress(data: *const u8, len: usize, output: *mut 
     if output.is_null() {
         return 1;
     }
+    clear_buffer(output);
     let Some(input) = input_slice(data, len) else {
         return 1;
     };
@@ -80,6 +94,7 @@ pub unsafe extern "C" fn xca_decompress(
     if output.is_null() {
         return 1;
     }
+    clear_buffer(output);
     let Some(input) = input_slice(data, len) else {
         return 1;
     };
@@ -179,4 +194,32 @@ pub unsafe extern "C" fn xca_buffer_free(buffer: *mut XcaBuffer) {
     unsafe { xca_free(buffer.data, buffer.len) };
     buffer.data = ptr::null_mut();
     buffer.len = 0;
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn failed_buffer_calls_clear_the_output() {
+        let mut output = XcaBuffer {
+            data: ptr::dangling_mut(),
+            len: usize::MAX,
+        };
+        let code = unsafe { xca_compress(ptr::null(), 1, &mut output) };
+        assert_eq!(code, 1);
+        assert!(output.data.is_null());
+        assert_eq!(output.len, 0);
+
+        output.data = ptr::dangling_mut();
+        output.len = usize::MAX;
+        let invalid = b"not an XCA archive";
+        let code =
+            unsafe { xca_decompress(invalid.as_ptr(), invalid.len(), &mut output) };
+        assert_eq!(code, 3);
+        assert!(output.data.is_null());
+        assert_eq!(output.len, 0);
+
+        unsafe { xca_buffer_free(&mut output) };
+    }
 }

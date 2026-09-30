@@ -1,6 +1,6 @@
 # XCA — eXtended Compression Algorithm
 
-XCA 0.12.0 is an independently implemented, dependency-free lossless compression library and CLI written in Rust. It writes XCA8 and decodes XCA4 through XCA8.
+XCA 0.12.1 is an independently implemented, dependency-free lossless compression library and CLI written in Rust. It writes XCA8 and decodes XCA4 through XCA8.
 
 XCA8 has one unified adaptive compression profile. There are no user-selectable XCA levels.
 
@@ -18,7 +18,7 @@ For every input, XCA automatically applies the same decision pipeline:
 
 This removes tuning ambiguity: the same `compress` operation is used for small files, binaries, logs, snapshots, and repeated corpora.
 
-## XCA 0.12.0 highlights
+## XCA 0.12.1 highlights
 
 - new XCA8 unified-profile format;
 - removed levels from the Rust API, C API, CLI, benchmark harness, and stream options;

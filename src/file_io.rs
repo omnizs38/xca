@@ -49,6 +49,15 @@ pub(crate) fn remove_failed_output(path: &Path) {
     let _ = fs::remove_file(path);
 }
 
+pub(crate) fn paths_refer_to_same_file(first: &Path, second: &Path) -> Result<bool, Error> {
+    let first = fs::canonicalize(first).map_err(ioe)?;
+    match fs::canonicalize(second) {
+        Ok(second) => Ok(first == second),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(error) => Err(ioe(error)),
+    }
+}
+
 #[cfg(unix)]
 mod platform {
     use std::ffi::c_void;
