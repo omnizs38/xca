@@ -1,6 +1,10 @@
 /target/
+fuzz/target/
+fuzz/artifacts/
 *.xca
 *.profraw
 .DS_Store
 __pycache__/
 *.py[cod]
+
+fuzz/corpus/
