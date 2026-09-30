@@ -114,7 +114,7 @@ pub fn compress_file(
 ) -> Result<FileStats, Error> {
     let input = file_io::ReadMap::open(input_path.as_ref())?;
     let output = compress(input.as_slice());
-    file_io::write_all(output_path.as_ref(), &output)?;
+    file_io::write_all_atomic(output_path.as_ref(), &output)?;
     Ok(FileStats {
         input_bytes: input.as_slice().len() as u64,
         output_bytes: output.len() as u64,
@@ -146,20 +146,13 @@ pub fn decompress_file_with_limit(
             limit,
         });
     }
-    let result = {
-        let mut output = file_io::WriteMap::create(output_path, output_len)?;
-        decompress_into_with_limit(input.as_slice(), output.as_mut_slice(), limit)
-    };
-    match result {
-        Ok(_) => Ok(FileStats {
-            input_bytes: input.as_slice().len() as u64,
-            output_bytes: output_len as u64,
-        }),
-        Err(error) => {
-            file_io::remove_failed_output(output_path);
-            Err(error)
-        }
-    }
+    let mut output = file_io::AtomicWriteMap::create(output_path, output_len)?;
+    decompress_into_with_limit(input.as_slice(), output.as_mut_slice(), limit)?;
+    output.commit()?;
+    Ok(FileStats {
+        input_bytes: input.as_slice().len() as u64,
+        output_bytes: output_len as u64,
+    })
 }
 #[cfg(feature = "c-api")]
 mod c_api;
@@ -231,20 +224,44 @@ mod tests {
         let middle = damaged.len() / 2;
         damaged[middle] ^= 1;
         fs::write(&archive, damaged).unwrap();
-        fs::remove_file(&restored).unwrap();
+        let existing_output = b"preserve this existing output";
+        fs::write(&restored, existing_output).unwrap();
         assert!(decompress_file(&archive, &restored).is_err());
-        assert!(!restored.exists());
+        assert_eq!(fs::read(&restored).unwrap(), existing_output);
 
         fs::write(&source, []).unwrap();
         compress_file(&source, &archive).unwrap();
         decompress_file(&archive, &restored).unwrap();
         assert!(fs::read(&restored).unwrap().is_empty());
 
+        for path in [source, archive, restored] {
+            let _ = fs::remove_file(path);
+        }
+    }
+
+    #[test]
+    fn file_helpers_reject_path_and_hard_link_aliases() {
+        let nonce = SystemTime::now()
+            .duration_since(UNIX_EPOCH)
+            .unwrap()
+            .as_nanos();
+        let root = std::env::temp_dir();
+        let source = root.join(format!("xca-{nonce}-alias-source.bin"));
+        let archive = root.join(format!("xca-{nonce}-alias-archive.xca"));
+        let archive_link = root.join(format!("xca-{nonce}-alias-link.xca"));
+
+        fs::write(&source, b"same-file identity regression").unwrap();
+        compress_file(&source, &archive).unwrap();
         let original_archive = fs::read(&archive).unwrap();
+
         assert!(decompress_file(&archive, &archive).is_err());
         assert_eq!(fs::read(&archive).unwrap(), original_archive);
 
-        for path in [source, archive, restored] {
+        fs::hard_link(&archive, &archive_link).unwrap();
+        assert!(decompress_file(&archive, &archive_link).is_err());
+        assert_eq!(fs::read(&archive).unwrap(), original_archive);
+
+        for path in [source, archive, archive_link] {
             let _ = fs::remove_file(path);
         }
     }

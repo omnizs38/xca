@@ -1,5 +1,14 @@
 # Changelog
 
+## 0.12.2 — 2026-09-30
+
+- Changed file compression and decompression to write through a same-directory temporary file and atomically replace the destination only after successful flush and validation.
+- Preserved existing destination files when an archive is corrupt or an output operation fails.
+- Extended same-file protection to detect hard links using platform file identities in addition to canonical paths.
+- Added regression coverage for destination preservation and hard-link aliases.
+- Added a libFuzzer target for bounded frame parsing, validation, and decompression.
+- Pinned third-party GitHub Actions to full commit SHAs and added a scheduled fuzz smoke test.
+
 ## 0.12.1 — 2026-09-30
 
 - Fixed C API failure paths so output buffers are always cleared and can be safely released after an error.
