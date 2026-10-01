@@ -1,5 +1,18 @@
 # Changelog
 
+## 0.14.0 — 2026-10-02
+
+- Reworked in-memory decoding to retain at most one worker window of decoded blocks before direct assembly.
+- Made `check` validate blocks sequentially without retaining the complete restored output.
+- Unified slice structural parsing for decode and `frame_info`, including strict terminator validation.
+- Added per-call `EncodeOptions` and `DecodeOptions` while preserving the legacy global thread setter.
+- Added explicit decoded-output limits to the C, C++, and Python APIs.
+- Made streaming decode bounded-memory by rejecting long-range-reference archives and trailing bytes.
+- Converted worker panics into structured errors instead of propagating panics from joins.
+- Preserved destination permissions and synchronized the parent directory after Unix atomic replacement.
+- Added permanent XCA4–XCA8 compatibility, streaming, terminator, FFI-limit, and per-call option tests.
+- Removed the unused standalone XCA3 source module and documented the Rust 1.88 MSRV.
+
 ## 0.13.0 — 2026-10-02
 
 - Added a cross-platform benchmark runner with pinned tool and corpus downloads, SHA-256 validation, safe local extraction, offline caching, fixed single/automatic CPU profiles, raw timings, median/IQR summaries, environment metadata, and baseline-ref comparisons.

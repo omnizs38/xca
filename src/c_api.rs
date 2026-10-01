@@ -1,4 +1,7 @@
-use super::{compress, decompress, decompress_into, frame_info};
+use super::{
+    decompress_into_with_limit, decompress_with_limit, frame_info, try_compress, Error,
+    DEFAULT_OUTPUT_LIMIT,
+};
 use std::{ffi::c_char, ptr, slice};
 
 #[repr(C)]
@@ -19,6 +22,8 @@ pub extern "C" fn xca_error_string(code: i32) -> *const c_char {
         1 => b"invalid pointer\0",
         2 => b"output buffer has the wrong size\0",
         3 => b"invalid or corrupted XCA input\0",
+        4 => b"decoded output exceeds the configured limit\0",
+        5 => b"internal XCA worker failure\0",
         _ => b"unknown XCA error\0",
     };
     message.as_ptr().cast()
@@ -74,21 +79,28 @@ pub unsafe extern "C" fn xca_compress(data: *const u8, len: usize, output: *mut 
     let Some(input) = input_slice(data, len) else {
         return 1;
     };
-    return_buffer(compress(input), output)
+    match try_compress(input) {
+        Ok(bytes) => return_buffer(bytes, output),
+        Err(Error::WorkerPanicked) => 5,
+        Err(_) => 3,
+    }
 }
 
 /// Decompresses an XCA frame into an allocated byte buffer.
 ///
-/// Returns 0 on success, 1 for invalid pointers, and 3 for invalid input.
-/// The returned buffer must be released with `xca_buffer_free` or `xca_free`.
+/// Returns 0 on success, 1 for invalid pointers, 3 for invalid input,
+/// 4 when the decoded output exceeds `max_output`, and 5 for an internal
+/// worker failure. The returned buffer must be released with
+/// `xca_buffer_free` or `xca_free`.
 ///
 /// # Safety
 /// `data` must reference `len` readable bytes when `len` is non-zero, and
 /// `output` must reference writable memory for one `XcaBuffer`.
 #[no_mangle]
-pub unsafe extern "C" fn xca_decompress(
+pub unsafe extern "C" fn xca_decompress_with_limit(
     data: *const u8,
     len: usize,
+    max_output: usize,
     output: *mut XcaBuffer,
 ) -> i32 {
     if output.is_null() {
@@ -98,10 +110,25 @@ pub unsafe extern "C" fn xca_decompress(
     let Some(input) = input_slice(data, len) else {
         return 1;
     };
-    match decompress(input) {
+    match decompress_with_limit(input, max_output) {
         Ok(bytes) => return_buffer(bytes, output),
+        Err(Error::OutputLimitExceeded { .. }) => 4,
+        Err(Error::WorkerPanicked) => 5,
         Err(_) => 3,
     }
+}
+
+/// Decompresses with the library's default output limit.
+///
+/// # Safety
+/// The pointer requirements are identical to `xca_decompress_with_limit`.
+#[no_mangle]
+pub unsafe extern "C" fn xca_decompress(
+    data: *const u8,
+    len: usize,
+    output: *mut XcaBuffer,
+) -> i32 {
+    unsafe { xca_decompress_with_limit(data, len, DEFAULT_OUTPUT_LIMIT, output) }
 }
 
 /// Returns the exact decoded size required by `xca_decompress_into`.
@@ -131,20 +158,22 @@ pub unsafe extern "C" fn xca_decompressed_size(
     }
 }
 
-/// Decompresses directly into caller-owned memory without an allocation or copy.
+/// Decompresses directly into caller-owned memory with an explicit limit.
 ///
 /// Returns 0 on success, 1 for invalid pointers, 2 for a wrong output size,
-/// and 3 for invalid input.
+/// 3 for invalid input, 4 when the decoded output exceeds `max_output`, and
+/// 5 for an internal worker failure.
 ///
 /// # Safety
 /// `data` must reference `len` readable bytes, and `output` must reference
 /// `output_len` writable bytes. Input and output must not overlap.
 #[no_mangle]
-pub unsafe extern "C" fn xca_decompress_into(
+pub unsafe extern "C" fn xca_decompress_into_with_limit(
     data: *const u8,
     len: usize,
     output: *mut u8,
     output_len: usize,
+    max_output: usize,
 ) -> i32 {
     let Some(input) = input_slice(data, len) else {
         return 1;
@@ -157,11 +186,27 @@ pub unsafe extern "C" fn xca_decompress_into(
         // SAFETY: The caller contract guarantees writable non-overlapping memory.
         unsafe { slice::from_raw_parts_mut(output, output_len) }
     };
-    match decompress_into(input, target) {
+    match decompress_into_with_limit(input, target, max_output) {
         Ok(_) => 0,
-        Err(super::Error::LengthMismatch { .. }) => 2,
+        Err(Error::LengthMismatch { .. }) => 2,
+        Err(Error::OutputLimitExceeded { .. }) => 4,
+        Err(Error::WorkerPanicked) => 5,
         Err(_) => 3,
     }
+}
+
+/// Decompresses directly into caller-owned memory with the default limit.
+///
+/// # Safety
+/// The pointer requirements are identical to `xca_decompress_into_with_limit`.
+#[no_mangle]
+pub unsafe extern "C" fn xca_decompress_into(
+    data: *const u8,
+    len: usize,
+    output: *mut u8,
+    output_len: usize,
+) -> i32 {
+    unsafe { xca_decompress_into_with_limit(data, len, output, output_len, DEFAULT_OUTPUT_LIMIT) }
 }
 
 /// Releases a buffer returned by XCA.
@@ -220,5 +265,19 @@ mod tests {
         assert_eq!(output.len, 0);
 
         unsafe { xca_buffer_free(&mut output) };
+    }
+
+    #[test]
+    fn c_api_enforces_explicit_output_limit() {
+        let archive = crate::compress(b"bounded ffi output");
+        let mut output = XcaBuffer {
+            data: ptr::null_mut(),
+            len: 0,
+        };
+        let code =
+            unsafe { xca_decompress_with_limit(archive.as_ptr(), archive.len(), 1, &mut output) };
+        assert_eq!(code, 4);
+        assert!(output.data.is_null());
+        assert_eq!(output.len, 0);
     }
 }

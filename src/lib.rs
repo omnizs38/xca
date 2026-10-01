@@ -9,8 +9,30 @@ pub use v4::{
     analyze_archive, compress_stream, decompress_stream, set_thread_limit, ArchiveAnalysis,
     CompressionOptions, StreamStats,
 };
-const DEFAULT_OUTPUT_LIMIT: usize = 1 << 30;
+pub const DEFAULT_OUTPUT_LIMIT: usize = 1 << 30;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct EncodeOptions {
+    /// Zero selects the operating system's available parallelism.
+    pub thread_limit: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DecodeOptions {
+    pub max_output_size: usize,
+    /// Zero selects the operating system's available parallelism.
+    pub thread_limit: usize,
+}
+
+impl Default for DecodeOptions {
+    fn default() -> Self {
+        Self {
+            max_output_size: DEFAULT_OUTPUT_LIMIT,
+            thread_limit: 0,
+        }
+    }
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct FileStats {
     pub input_bytes: u64,
@@ -51,6 +73,8 @@ pub enum Error {
     OutputLimitExceeded { requested: usize, limit: usize },
     TrailingData,
     InputTooLarge,
+    WorkerPanicked,
+    StreamingReferencesUnsupported,
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -79,18 +103,42 @@ impl fmt::Display for Error {
             }
             Self::TrailingData => write!(f, "unexpected trailing data"),
             Self::InputTooLarge => write!(f, "input is too large"),
+            Self::WorkerPanicked => write!(f, "XCA worker thread panicked"),
+            Self::StreamingReferencesUnsupported => {
+                write!(f, "streaming decode does not support long-range references")
+            }
         }
     }
 }
 impl std::error::Error for Error {}
+pub fn try_compress(input: &[u8]) -> Result<Vec<u8>, Error> {
+    try_compress_with_options(input, EncodeOptions::default())
+}
+
+pub fn try_compress_with_options(input: &[u8], options: EncodeOptions) -> Result<Vec<u8>, Error> {
+    v4::with_thread_limit(options.thread_limit, || v4::compress_slice(input))
+}
+
 pub fn compress(input: &[u8]) -> Vec<u8> {
-    v4::compress_slice(input).expect("built-in unified profile is valid")
+    try_compress(input).expect("XCA compression failed")
 }
 pub fn decompress(input: &[u8]) -> Result<Vec<u8>, Error> {
     decompress_with_limit(input, DEFAULT_OUTPUT_LIMIT)
 }
 pub fn decompress_with_limit(input: &[u8], limit: usize) -> Result<Vec<u8>, Error> {
-    v4::decompress_slice(input, limit)
+    decompress_with_options(
+        input,
+        DecodeOptions {
+            max_output_size: limit,
+            ..DecodeOptions::default()
+        },
+    )
+}
+
+pub fn decompress_with_options(input: &[u8], options: DecodeOptions) -> Result<Vec<u8>, Error> {
+    v4::with_thread_limit(options.thread_limit, || {
+        v4::decompress_slice(input, options.max_output_size)
+    })
 }
 pub fn decompress_into(input: &[u8], output: &mut [u8]) -> Result<usize, Error> {
     decompress_into_with_limit(input, output, DEFAULT_OUTPUT_LIMIT)
@@ -100,7 +148,24 @@ pub fn decompress_into_with_limit(
     output: &mut [u8],
     limit: usize,
 ) -> Result<usize, Error> {
-    v4::decompress_into_slice(input, output, limit)
+    decompress_into_with_options(
+        input,
+        output,
+        DecodeOptions {
+            max_output_size: limit,
+            ..DecodeOptions::default()
+        },
+    )
+}
+
+pub fn decompress_into_with_options(
+    input: &[u8],
+    output: &mut [u8],
+    options: DecodeOptions,
+) -> Result<usize, Error> {
+    v4::with_thread_limit(options.thread_limit, || {
+        v4::decompress_into_slice(input, output, options.max_output_size)
+    })
 }
 pub fn frame_info(input: &[u8]) -> Result<FrameInfo, Error> {
     v4::frame_info(input)
@@ -112,9 +177,16 @@ pub fn compress_file(
     input_path: impl AsRef<Path>,
     output_path: impl AsRef<Path>,
 ) -> Result<FileStats, Error> {
-    let input = file_io::ReadMap::open(input_path.as_ref())?;
-    let output = compress(input.as_slice());
-    file_io::write_all_atomic(output_path.as_ref(), &output)?;
+    let input_path = input_path.as_ref();
+    let output_path = output_path.as_ref();
+    if file_io::paths_refer_to_same_file(input_path, output_path)? {
+        return Err(Error::Io(
+            "input and output paths refer to the same file".to_owned(),
+        ));
+    }
+    let input = file_io::ReadMap::open(input_path)?;
+    let output = try_compress(input.as_slice())?;
+    file_io::write_all_atomic(output_path, &output)?;
     Ok(FileStats {
         input_bytes: input.as_slice().len() as u64,
         output_bytes: output.len() as u64,

@@ -22,8 +22,30 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings -A clippy::possible-missing-else
       - run: cargo test --all-targets --all-features
       - run: cargo build --release --all-features
+      - run: cargo package --allow-dirty
       - run: python scripts/bench.py doctor
       - run: python -m py_compile scripts/bench.py
       - run: python -m unittest scripts/test_bench.py
       - run: python -c "from pathlib import Path; Path('.bench-smoke.bin').write_bytes((b'XCA smoke benchmark\\n' * 65536))"
       - run: cargo run --release -- bench .bench-smoke.bin 1
+
+  msrv:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@6bed0761d98439e5a578e2877258200ad565ba87 # stable
+        with:
+          toolchain: "1.88.0"
+      - run: cargo test --all-targets --all-features
+
+  miri:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
+        with:
+          components: miri
+      - run: cargo miri test --lib codec::tests
+      - run: cargo miri test --lib huffman::tests
