@@ -1,4 +1,5 @@
 use crate::{crc32, huffman, Error, FrameInfo, Method};
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::io::{Read, Write};
 use std::sync::atomic::{AtomicUsize, Ordering};
@@ -32,6 +33,9 @@ const MAX_M: usize = u16::MAX as usize;
 const UNIFIED_DEPTH: usize = 16;
 const NONE_POSITION: u32 = u32::MAX;
 static THREAD_LIMIT: AtomicUsize = AtomicUsize::new(0);
+thread_local! {
+    static CALL_THREAD_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
+}
 
 pub fn set_thread_limit(limit: usize) {
     THREAD_LIMIT.store(limit, Ordering::Relaxed);
@@ -39,13 +43,27 @@ pub fn set_thread_limit(limit: usize) {
 
 fn worker_count(tasks: usize) -> usize {
     let available = thread::available_parallelism().map_or(1, |value| value.get());
-    let limit = THREAD_LIMIT.load(Ordering::Relaxed);
+    let limit = CALL_THREAD_LIMIT
+        .get()
+        .unwrap_or_else(|| THREAD_LIMIT.load(Ordering::Relaxed));
     let requested = if limit == 0 {
         available
     } else {
         available.min(limit)
     };
     requested.min(tasks.max(1))
+}
+
+pub(crate) fn with_thread_limit<T>(limit: usize, operation: impl FnOnce() -> T) -> T {
+    let previous = CALL_THREAD_LIMIT.replace(Some(limit));
+    struct Reset(Option<usize>);
+    impl Drop for Reset {
+        fn drop(&mut self) {
+            CALL_THREAD_LIMIT.set(self.0);
+        }
+    }
+    let _reset = Reset(previous);
+    operation()
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressionOptions {
@@ -185,12 +203,12 @@ pub fn compress_slice(input: &[u8]) -> Result<Vec<u8>, Error> {
             }
             let mut ordered: Vec<Option<EncodedBlock>> = (0..count).map(|_| None).collect();
             for handle in handles {
-                for (index, block) in handle.join().expect("XCA worker panicked") {
+                for (index, block) in handle.join().map_err(|_| Error::WorkerPanicked)? {
                     ordered[index] = Some(block);
                 }
             }
-            ordered.into_iter().map(Option::unwrap).collect::<Vec<_>>()
-        })
+            Ok::<_, Error>(ordered.into_iter().map(Option::unwrap).collect::<Vec<_>>())
+        })?
     };
     for index in 0..blocks.len() {
         if blocks[index].method == REFERENCE {
@@ -263,12 +281,10 @@ pub fn verify_slice(input: &[u8], limit: usize) -> Result<usize, Error> {
     Ok(total)
 }
 
-fn decode_frame(
+fn parse_frame(
     input: &[u8],
     limit: usize,
-    destination: Option<&mut [u8]>,
-    assemble: bool,
-) -> Result<Option<Vec<u8>>, Error> {
+) -> Result<(Vec<BlockDescriptor<'_>>, Vec<usize>, usize), Error> {
     if input.len() < HEADER
         || &input[..4] != MAGIC_V4
             && &input[..4] != MAGIC_V5
@@ -288,9 +304,11 @@ fn decode_frame(
     if !(MIN_BLOCK..=MAX_BLOCK).contains(&block_size) {
         return Err(Error::InvalidBlockSize(block_size));
     }
+
     let mut cursor = HEADER;
     let mut total = 0usize;
     let mut descriptors = Vec::new();
+    let mut offsets = vec![0usize];
     loop {
         if cursor + BH > input.len() {
             return Err(Error::Truncated);
@@ -314,6 +332,15 @@ fn decode_frame(
         if original == 0 || original > block_size || packed > original {
             return Err(Error::InvalidBlockSize(original));
         }
+        if !matches!(
+            method,
+            STORED | PULSE | PULSE_HUFFMAN | PULSE_SPLIT | REFERENCE
+        ) {
+            return Err(Error::UnsupportedMethod(method));
+        }
+        if predictor > XOR {
+            return Err(Error::UnsupportedMethod(predictor));
+        }
         total = total.checked_add(original).ok_or(Error::InputTooLarge)?;
         if total > limit {
             return Err(Error::OutputLimitExceeded {
@@ -325,6 +352,9 @@ fn decode_frame(
         if end > input.len() {
             return Err(Error::Truncated);
         }
+        if method == REFERENCE && input[5] & 2 == 0 {
+            return Err(Error::InvalidMatch);
+        }
         descriptors.push(BlockDescriptor {
             method,
             predictor,
@@ -332,12 +362,109 @@ fn decode_frame(
             payload: &input[cursor..end],
             checksum,
         });
-        if method == REFERENCE && input[5] & 2 == 0 {
-            return Err(Error::InvalidMatch);
-        }
+        offsets.push(total);
         cursor = end;
     }
-    let count = descriptors.len();
+    Ok((descriptors, offsets, total))
+}
+
+fn reference_target(descriptors: &[BlockDescriptor<'_>], index: usize) -> Result<usize, Error> {
+    let descriptor = descriptors[index];
+    if descriptor.predictor != NONE_P || descriptor.payload.len() != 4 {
+        return Err(Error::InvalidMatch);
+    }
+    let target = u32::from_le_bytes(descriptor.payload.try_into().unwrap()) as usize;
+    if target >= index {
+        return Err(Error::InvalidMatch);
+    }
+    if descriptors[target].original != descriptor.original {
+        return Err(Error::LengthMismatch {
+            expected: descriptor.original,
+            actual: descriptors[target].original,
+        });
+    }
+    if descriptors[target].checksum != descriptor.checksum {
+        return Err(Error::ChecksumMismatch {
+            expected: descriptor.checksum,
+            actual: descriptors[target].checksum,
+        });
+    }
+    Ok(target)
+}
+
+fn copy_reference(output: &mut [u8], offsets: &[usize], index: usize, target: usize) {
+    let destination_start = offsets[index];
+    let destination_end = offsets[index + 1];
+    let source_start = offsets[target];
+    let source_end = offsets[target + 1];
+    let (before, destination) = output.split_at_mut(destination_start);
+    destination[..destination_end - destination_start]
+        .copy_from_slice(&before[source_start..source_end]);
+}
+
+fn decode_direct(
+    descriptors: &[BlockDescriptor<'_>],
+    offsets: &[usize],
+    output: &mut [u8],
+) -> Result<(), Error> {
+    let workers = worker_count(descriptors.len());
+    let mut index = 0usize;
+    while index < descriptors.len() {
+        if descriptors[index].method == REFERENCE {
+            let target = reference_target(descriptors, index)?;
+            copy_reference(output, offsets, index, target);
+            index += 1;
+            continue;
+        }
+
+        let mut end = index + 1;
+        while end < descriptors.len()
+            && descriptors[end].method != REFERENCE
+            && end - index < workers
+        {
+            end += 1;
+        }
+        let decoded = if end - index == 1 {
+            vec![decode_block(descriptors[index])?]
+        } else {
+            thread::scope(|scope| {
+                let mut handles = Vec::with_capacity(end - index);
+                for descriptor in &descriptors[index..end] {
+                    handles.push(scope.spawn(move || decode_block(*descriptor)));
+                }
+                let mut blocks = Vec::with_capacity(handles.len());
+                for handle in handles {
+                    blocks.push(handle.join().map_err(|_| Error::WorkerPanicked)??);
+                }
+                Ok::<_, Error>(blocks)
+            })?
+        };
+        for (block_index, block) in (index..end).zip(decoded) {
+            output[offsets[block_index]..offsets[block_index + 1]].copy_from_slice(&block);
+        }
+        index = end;
+    }
+    Ok(())
+}
+
+fn verify_blocks(descriptors: &[BlockDescriptor<'_>]) -> Result<(), Error> {
+    for (index, descriptor) in descriptors.iter().copied().enumerate() {
+        if descriptor.method == REFERENCE {
+            reference_target(descriptors, index)?;
+        } else {
+            decode_block(descriptor)?;
+        }
+    }
+    Ok(())
+}
+
+fn decode_frame(
+    input: &[u8],
+    limit: usize,
+    destination: Option<&mut [u8]>,
+    assemble: bool,
+) -> Result<Option<Vec<u8>>, Error> {
+    let (descriptors, offsets, total) = parse_frame(input, limit)?;
     if let Some(output) = destination.as_ref() {
         if output.len() != total {
             return Err(Error::LengthMismatch {
@@ -346,143 +473,17 @@ fn decode_frame(
             });
         }
     }
-    let workers = worker_count(count);
-    let decoded = thread::scope(|scope| {
-        let mut handles = Vec::new();
-        for worker in 0..workers {
-            let descriptors = &descriptors;
-            handles.push(scope.spawn(move || {
-                let mut local = Vec::new();
-                for index in (worker..count).step_by(workers) {
-                    if descriptors[index].method != REFERENCE {
-                        local.push((index, decode_block(descriptors[index])));
-                    }
-                }
-                local
-            }));
-        }
-        let mut ordered: Vec<Option<Result<Vec<u8>, Error>>> = (0..count).map(|_| None).collect();
-        for handle in handles {
-            for (index, block) in handle.join().expect("XCA decoder worker panicked") {
-                ordered[index] = Some(block);
-            }
-        }
-        ordered
-    });
-    let mut decoded_results = decoded;
-    let mut decoded = Vec::<Option<Vec<u8>>>::with_capacity(count);
-    decoded.resize_with(count, || None);
-    let mut roots = vec![0usize; count];
-    let mut offsets = Vec::with_capacity(count + 1);
-    offsets.push(0usize);
-    for index in 0..count {
-        let descriptor = descriptors[index];
-        if descriptor.method == REFERENCE {
-            if descriptor.predictor != NONE_P || descriptor.payload.len() != 4 {
-                return Err(Error::InvalidMatch);
-            }
-            let target = u32::from_le_bytes(descriptor.payload.try_into().unwrap()) as usize;
-            if target >= index {
-                return Err(Error::InvalidMatch);
-            }
-            if descriptors[target].original != descriptor.original {
-                return Err(Error::LengthMismatch {
-                    expected: descriptor.original,
-                    actual: descriptors[target].original,
-                });
-            }
-            let target_checksum = descriptors[target].checksum;
-            if target_checksum != descriptor.checksum {
-                return Err(Error::ChecksumMismatch {
-                    expected: descriptor.checksum,
-                    actual: target_checksum,
-                });
-            }
-            roots[index] = roots[target];
-        } else {
-            let block = decoded_results[index]
-                .take()
-                .expect("every independent XCA block was scheduled")?;
-            roots[index] = index;
-            decoded[index] = Some(block);
-        }
-        offsets.push(
-            offsets[index]
-                .checked_add(descriptor.original)
-                .ok_or(Error::InputTooLarge)?,
-        );
-    }
-
     if !assemble {
+        verify_blocks(&descriptors)?;
         return Ok(None);
     }
-
     if let Some(output) = destination {
-        assemble_output(output, workers, &roots, &offsets, &decoded);
+        decode_direct(&descriptors, &offsets, output)?;
         return Ok(None);
     }
-
-    const PARALLEL_ASSEMBLY_THRESHOLD: usize = 64 * 1024 * 1024;
-    if total < PARALLEL_ASSEMBLY_THRESHOLD || workers == 1 {
-        let mut output = Vec::with_capacity(total);
-        for index in 0..count {
-            let source = decoded[roots[index]]
-                .as_ref()
-                .expect("reference root must be independently decoded");
-            output.extend_from_slice(source);
-        }
-        return Ok(Some(output));
-    }
-
     let mut output = vec![0u8; total];
-    assemble_output(&mut output, workers, &roots, &offsets, &decoded);
+    decode_direct(&descriptors, &offsets, &mut output)?;
     Ok(Some(output))
-}
-
-fn assemble_output(
-    output: &mut [u8],
-    workers: usize,
-    roots: &[usize],
-    offsets: &[usize],
-    decoded: &[Option<Vec<u8>>],
-) {
-    const PARALLEL_ASSEMBLY_THRESHOLD: usize = 64 * 1024 * 1024;
-    let count = roots.len();
-    if output.len() < PARALLEL_ASSEMBLY_THRESHOLD || workers == 1 {
-        for index in 0..count {
-            let source = decoded[roots[index]]
-                .as_ref()
-                .expect("reference root must be independently decoded");
-            output[offsets[index]..offsets[index + 1]].copy_from_slice(source);
-        }
-        return;
-    }
-
-    thread::scope(|scope| {
-        let mut remaining = &mut *output;
-        let mut first = 0usize;
-        for worker in 0..workers {
-            let last = count * (worker + 1) / workers;
-            let byte_count = offsets[last] - offsets[first];
-            let (partition, rest) = remaining.split_at_mut(byte_count);
-            remaining = rest;
-            let base = offsets[first];
-            let roots = &roots;
-            let offsets = &offsets;
-            let decoded = &decoded;
-            scope.spawn(move || {
-                for index in first..last {
-                    let source = decoded[roots[index]]
-                        .as_ref()
-                        .expect("reference root must be independently decoded");
-                    let start = offsets[index] - base;
-                    let end = offsets[index + 1] - base;
-                    partition[start..end].copy_from_slice(source);
-                }
-            });
-            first = last;
-        }
-    });
 }
 
 fn plan_blocks(input: &[u8], block_size: usize) -> (Vec<(usize, usize)>, Vec<Option<usize>>) {
@@ -762,7 +763,9 @@ pub fn decompress_stream<R: Read, W: Write>(
     if !valid_flags(h[5..8].try_into().unwrap()) {
         return Err(Error::InvalidEntropyData);
     }
-    let keeps_history = h[5] & 2 != 0;
+    if h[5] & 2 != 0 {
+        return Err(Error::StreamingReferencesUnsupported);
+    }
     let bs = u32::from_le_bytes(h[8..12].try_into().unwrap()) as usize;
     if !(MIN_BLOCK..=MAX_BLOCK).contains(&bs) {
         return Err(Error::InvalidBlockSize(bs));
@@ -771,8 +774,6 @@ pub fn decompress_stream<R: Read, W: Write>(
         input_bytes: HEADER as u64,
         ..Default::default()
     };
-    let mut history = Vec::<Vec<u8>>::new();
-    let mut history_checksums = Vec::<u32>::new();
     loop {
         let mut h = [0; BH];
         exact(r, &mut h)?;
@@ -803,7 +804,6 @@ pub fn decompress_stream<R: Read, W: Write>(
         let mut p = vec![0; pn];
         exact(r, &mut p)?;
         st.input_bytes += pn as u64;
-        let mut reused_checksum = None;
         let mut data = match m {
             STORED if pred == NONE_P && p.len() == n => p,
             PULSE => decode(&p, n, false)?,
@@ -812,23 +812,11 @@ pub fn decompress_stream<R: Read, W: Write>(
                 decode(&pulse, n, false)?
             }
             PULSE_SPLIT => split_decode(&p, n)?,
-            REFERENCE if keeps_history && pred == NONE_P && p.len() == 4 => {
-                let target = u32::from_le_bytes(p.try_into().unwrap()) as usize;
-                let referenced = history.get(target).ok_or(Error::InvalidMatch)?;
-                if referenced.len() != n {
-                    return Err(Error::LengthMismatch {
-                        expected: n,
-                        actual: referenced.len(),
-                    });
-                }
-                reused_checksum = Some(history_checksums[target]);
-                referenced.clone()
-            }
             STORED => return Err(Error::InvalidMatch),
             x => return Err(Error::UnsupportedMethod(x)),
         };
         inverse(&mut data, pred)?;
-        let actual = reused_checksum.unwrap_or_else(|| crc32(&data));
+        let actual = crc32(&data);
         if actual != crc {
             return Err(Error::ChecksumMismatch {
                 expected: crc,
@@ -836,16 +824,19 @@ pub fn decompress_stream<R: Read, W: Write>(
             });
         }
         w.write_all(&data).map_err(ioe)?;
-        if keeps_history {
-            history.push(data);
-            history_checksums.push(crc);
-        }
         st.output_bytes += n as u64;
         st.blocks = st.blocks.checked_add(1).ok_or(Error::InputTooLarge)?
+    }
+    let mut trailing = [0u8; 1];
+    if r.read(&mut trailing).map_err(ioe)? != 0 {
+        return Err(Error::TrailingData);
     }
     Ok(st)
 }
 pub fn analyze_archive(input: &[u8]) -> Result<ArchiveAnalysis, Error> {
+    // Keep diagnostics structurally identical to normal decoding. The second
+    // pass below gathers token statistics without reconstructing output.
+    parse_frame(input, usize::MAX)?;
     if input.len() < HEADER
         || &input[..4] != MAGIC_V4
             && &input[..4] != MAGIC_V5
@@ -980,81 +971,35 @@ pub fn analyze_archive(input: &[u8]) -> Result<ArchiveAnalysis, Error> {
     }
     Ok(result)
 }
-pub fn frame_info(i: &[u8]) -> Result<FrameInfo, Error> {
-    if i.len() < HEADER
-        || &i[..4] != MAGIC_V4
-            && &i[..4] != MAGIC_V5
-            && &i[..4] != MAGIC_V6
-            && &i[..4] != MAGIC_V7
-            && &i[..4] != MAGIC_V8
-    {
-        return Err(Error::BadMagic);
+pub fn frame_info(input: &[u8]) -> Result<FrameInfo, Error> {
+    let (descriptors, _, original_size) = parse_frame(input, usize::MAX)?;
+    for (index, descriptor) in descriptors.iter().enumerate() {
+        if descriptor.method == REFERENCE {
+            reference_target(&descriptors, index)?;
+        }
     }
-    if !valid_profile(&i[..4], i[4]) {
-        return Err(Error::InvalidLevel(i[4]));
-    }
-    if !valid_flags(i[5..8].try_into().unwrap()) {
-        return Err(Error::InvalidEntropyData);
-    }
-    let bs = u32::from_le_bytes(i[8..12].try_into().unwrap()) as usize;
-    if !(MIN_BLOCK..=MAX_BLOCK).contains(&bs) {
-        return Err(Error::InvalidBlockSize(bs));
-    }
-    let (mut c, mut blocks, mut original) = (HEADER, 0u32, 0usize);
-    while c + BH <= i.len() {
-        let m = i[c];
-        let pred = i[c + 1];
-        let n = u32::from_le_bytes(i[c + 2..c + 6].try_into().unwrap()) as usize;
-        let pn = u32::from_le_bytes(i[c + 6..c + 10].try_into().unwrap()) as usize;
-        c += BH;
-        if m == END {
-            if pred != 0 || n != 0 || pn != 0 || c != i.len() {
-                return Err(Error::TrailingData);
-            }
-            return Ok(FrameInfo {
-                version: if &i[..4] == MAGIC_V8 {
-                    8
-                } else if &i[..4] == MAGIC_V7 {
-                    7
-                } else if &i[..4] == MAGIC_V6 {
-                    6
-                } else if &i[..4] == MAGIC_V5 {
-                    5
-                } else {
-                    4
-                },
-                method: Method::Adaptive,
-                legacy_level: (&i[..4] != MAGIC_V8).then_some(i[4]),
-                original_size: original,
-                frame_size: i.len(),
-                checksum: true,
-                blocks,
-            });
-        }
-        if n == 0 || n > bs || pn > n {
-            return Err(Error::InvalidBlockSize(n));
-        }
-        if !matches!(m, STORED | PULSE | PULSE_HUFFMAN | PULSE_SPLIT | REFERENCE) || pred > XOR {
-            return Err(Error::UnsupportedMethod(m));
-        }
-        if m == REFERENCE && (i[5] & 2 == 0 || pred != NONE_P || pn != 4) {
-            return Err(Error::InvalidMatch);
-        }
-        c = c.checked_add(pn).ok_or(Error::InputTooLarge)?;
-        if c > i.len() {
-            return Err(Error::Truncated);
-        }
-        if m == REFERENCE {
-            let target = u32::from_le_bytes(i[c - 4..c].try_into().unwrap());
-            if target >= blocks {
-                return Err(Error::InvalidMatch);
-            }
-        }
-        original = original.checked_add(n).ok_or(Error::InputTooLarge)?;
-        blocks = blocks.checked_add(1).ok_or(Error::InputTooLarge)?
-    }
-    Err(Error::Truncated)
+    let magic = &input[..4];
+    Ok(FrameInfo {
+        version: if magic == MAGIC_V8 {
+            8
+        } else if magic == MAGIC_V7 {
+            7
+        } else if magic == MAGIC_V6 {
+            6
+        } else if magic == MAGIC_V5 {
+            5
+        } else {
+            4
+        },
+        method: Method::Adaptive,
+        legacy_level: (magic != MAGIC_V8).then_some(input[4]),
+        original_size,
+        frame_size: input.len(),
+        checksum: true,
+        blocks: u32::try_from(descriptors.len()).map_err(|_| Error::InputTooLarge)?,
+    })
 }
+
 fn choose(i: &[u8]) -> u8 {
     let n = i.len().min(8192);
     if n < 64 {
@@ -1840,8 +1785,15 @@ mod tests {
         let slice = decompress_slice(&archive, data.len()).unwrap();
         let mut caller_owned = vec![0; data.len()];
         decompress_into_slice(&archive, &mut caller_owned, data.len()).unwrap();
+        let mut stream_archive = Vec::new();
+        compress_stream(
+            &mut data.as_slice(),
+            &mut stream_archive,
+            CompressionOptions::default(),
+        )
+        .unwrap();
         let mut stream = Vec::new();
-        decompress_stream(&mut archive.as_slice(), &mut stream, data.len()).unwrap();
+        decompress_stream(&mut stream_archive.as_slice(), &mut stream, data.len()).unwrap();
         assert_eq!(slice, data);
         assert_eq!(caller_owned, data);
         assert_eq!(stream, data);

@@ -132,7 +132,12 @@ fn create_temporary_file(destination: &Path) -> Result<(PathBuf, File), Error> {
             .create_new(true)
             .open(&temporary_path)
         {
-            Ok(file) => return Ok((temporary_path, file)),
+            Ok(file) => {
+                if let Ok(metadata) = fs::metadata(destination) {
+                    file.set_permissions(metadata.permissions()).map_err(ioe)?;
+                }
+                return Ok((temporary_path, file));
+            }
             Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
             Err(error) => return Err(ioe(error)),
         }
@@ -279,7 +284,9 @@ mod platform {
     }
 
     pub(super) fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
-        fs::rename(source, destination)
+        fs::rename(source, destination)?;
+        let parent = destination.parent().unwrap_or_else(|| Path::new("."));
+        File::open(parent)?.sync_all()
     }
 }
 

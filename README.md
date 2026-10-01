@@ -1,6 +1,6 @@
 # XCA — eXtended Compression Algorithm
 
-XCA 0.13.0 is an independently implemented, dependency-free lossless compression library and CLI written in Rust. It writes XCA8 and decodes XCA4 through XCA8.
+XCA 0.14.0 is an independently implemented, dependency-free lossless compression library and CLI written in Rust. It writes XCA8 and decodes XCA4 through XCA8.
 
 XCA8 has one unified adaptive compression profile. There are no user-selectable XCA levels.
 
@@ -18,7 +18,7 @@ For every input, XCA automatically applies the same decision pipeline:
 
 This removes tuning ambiguity: the same `compress` operation is used for small files, binaries, logs, snapshots, and repeated corpora.
 
-## XCA 0.13.0 highlights
+## XCA 0.14.0 highlights
 
 - new XCA8 unified-profile format;
 - removed levels from the Rust API, C API, CLI, benchmark harness, and stream options;
@@ -28,7 +28,8 @@ This removes tuning ambiguity: the same `compress` operation is used for small f
 - XCA8 Split Pulse for unique blocks;
 - backward decoding compatibility with XCA4–XCA7;
 - direct memory-mapped file input and decompression output on Windows and Unix;
-- `decompress_into` avoids allocating and copying a second full-size output buffer;
+- `decompress` and `decompress_into` decode through a bounded worker window instead of retaining every decoded block;
+- `check` validates with one block-sized scratch allocation;
 - adaptive parallel output assembly directly into files and external buffers;
 - validation-only `check` without constructing the complete restored output;
 - simple Rust file helpers plus C, C++, and Python integration layers;
@@ -38,8 +39,9 @@ This removes tuning ambiguity: the same `compress` operation is used for small f
 - collision-free split library/CLI build scripts for MSVC;
 - byte-identical faster CRC, CDC, Huffman accounting, and Pulse match finding;
 - reusable worker-local match workspaces and a direct single-worker path;
-- explicit thread limits through Rust and `XCA_THREADS`;
-- 28 strict adversarial, determinism, reference, corruption, file, and boundary tests;
+- per-call `EncodeOptions` / `DecodeOptions`, plus CLI `XCA_THREADS`;
+- explicit output limits in Rust, C, C++, and Python;
+- 34 strict adversarial, compatibility, streaming, determinism, reference, corruption, file, and boundary tests;
 - reproducible pinned XCA/Zstandard/LZ4/XZ benchmark automation on Windows, Linux, and macOS;
 - no third-party runtime or compression dependencies.
 
@@ -92,9 +94,11 @@ Add `-Native` for a machine-optimized binary. Building library and CLI targets s
 
 ## Streaming
 
-`CompressionOptions` contains only `block_size`. `compress_stream` uses the same unified block codec but keeps independent fixed blocks because arbitrary backward references require retained input history. In-memory `compress` enables global deduplication.
+`CompressionOptions` contains only `block_size`. `compress_stream` writes independent fixed blocks. To guarantee bounded memory, `decompress_stream` rejects archives containing long-range references and rejects trailing bytes after the terminator. Use `decompress` or `decompress_into` for globally deduplicated in-memory archives.
 
-`set_thread_limit(n)` limits in-memory compression and decompression workers; `0` restores automatic parallelism. The CLI reads the equivalent `XCA_THREADS` environment variable and requires a positive integer.
+`EncodeOptions` and `DecodeOptions` provide per-call thread limits; zero selects automatic parallelism. The legacy process-wide `set_thread_limit` remains available for compatibility. The CLI reads `XCA_THREADS` and requires a positive integer.
+
+C exposes `xca_decompress_with_limit` and `xca_decompress_into_with_limit`. Python and C++ default to a 256 MiB decoded-output limit; pass an explicit application limit when larger data is expected.
 
 ## Strict cross-engine benchmark
 

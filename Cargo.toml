@@ -1,7 +1,11 @@
 [package]
 name = "xca"
-version = "0.13.0"
+version = "0.14.0"
 edition = "2021"
+rust-version = "1.88"
+readme = "README.md"
+homepage = "https://github.com/omnizs38/xca"
+documentation = "https://docs.rs/xca"
 description = "Embeddable adaptive lossless compression library and CLI"
 license = "GPL-3.0-only"
 repository = "https://github.com/omnizs38/xca"

@@ -29,7 +29,7 @@ let mut restored = vec![0; info.original_size];
 xca::decompress_into(&archive, &mut restored)?;
 ```
 
-Use `decompress_into_with_limit` when the application supplies its own decoded-size policy.
+Use `decompress_into_with_limit` when the application supplies its own decoded-size policy. C callers should use `xca_decompress_with_limit` or `xca_decompress_into_with_limit`; Python and C++ bindings default to 256 MiB and accept an explicit larger limit.
 
 ## C ABI
 
@@ -119,4 +119,4 @@ The CLI returns a non-zero process status on failure and can be embedded in scri
 
 ## Compatibility
 
-XCA 0.12.2 writes XCA8. The decoder accepts XCA4 through XCA8. New applications should treat the format as experimental until a stable 1.0 specification is published.
+XCA 0.14.0 writes XCA8. The decoder accepts XCA4 through XCA8. New applications should treat the format as experimental until a stable 1.0 specification is published.

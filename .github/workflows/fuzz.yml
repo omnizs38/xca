@@ -1,6 +1,11 @@
 name: Fuzz
 
 on:
+  pull_request:
+    paths:
+      - "src/**"
+      - "fuzz/**"
+      - "Cargo.toml"
   schedule:
     - cron: "17 3 * * 1"
   workflow_dispatch:
@@ -16,5 +21,13 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
       - run: cargo install cargo-fuzz --locked
-      - run: cargo fuzz run decompress -- -max_total_time=180 -max_len=1048576
-      - run: cargo fuzz run round_trip -- -max_total_time=180 -max_len=2097152
+      - name: Select fuzz duration
+        shell: bash
+        run: |
+          if [[ "${{ github.event_name }}" == "pull_request" ]]; then
+            echo "FUZZ_SECONDS=30" >> "$GITHUB_ENV"
+          else
+            echo "FUZZ_SECONDS=180" >> "$GITHUB_ENV"
+          fi
+      - run: cargo fuzz run decompress -- -max_total_time=$FUZZ_SECONDS -max_len=1048576
+      - run: cargo fuzz run round_trip -- -max_total_time=$FUZZ_SECONDS -max_len=2097152

@@ -1,6 +1,6 @@
 # XCA8 binary format
 
-All integers are unsigned and little-endian. XCA 0.11 writes XCA8 and accepts legacy XCA4–XCA7 streams.
+All integers are unsigned and little-endian. XCA 0.14 writes XCA8 and accepts legacy XCA4–XCA7 streams.
 
 ## Stream header
 

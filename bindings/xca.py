@@ -43,6 +43,13 @@ _lib.xca_compress.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, c
 _lib.xca_compress.restype = ctypes.c_int32
 _lib.xca_decompress.argtypes = [ctypes.POINTER(ctypes.c_uint8), ctypes.c_size_t, ctypes.POINTER(_Buffer)]
 _lib.xca_decompress.restype = ctypes.c_int32
+_lib.xca_decompress_with_limit.argtypes = [
+    ctypes.POINTER(ctypes.c_uint8),
+    ctypes.c_size_t,
+    ctypes.c_size_t,
+    ctypes.POINTER(_Buffer),
+]
+_lib.xca_decompress_with_limit.restype = ctypes.c_int32
 _lib.xca_decompressed_size.argtypes = [
     ctypes.POINTER(ctypes.c_uint8),
     ctypes.c_size_t,
@@ -56,6 +63,14 @@ _lib.xca_decompress_into.argtypes = [
     ctypes.c_size_t,
 ]
 _lib.xca_decompress_into.restype = ctypes.c_int32
+_lib.xca_decompress_into_with_limit.argtypes = [
+    ctypes.POINTER(ctypes.c_uint8),
+    ctypes.c_size_t,
+    ctypes.POINTER(ctypes.c_uint8),
+    ctypes.c_size_t,
+    ctypes.c_size_t,
+]
+_lib.xca_decompress_into_with_limit.restype = ctypes.c_int32
 _lib.xca_buffer_free.argtypes = [ctypes.POINTER(_Buffer)]
 
 
@@ -79,14 +94,20 @@ def compress(data: bytes) -> bytes:
     return _call(_lib.xca_compress, data)
 
 
-def decompress(data: bytes) -> bytes:
+def decompress(data: bytes, *, max_output_size: int = 256 * 1024 * 1024) -> bytes:
+    if max_output_size < 0:
+        raise ValueError("max_output_size must be non-negative")
     source = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
     size = ctypes.c_size_t()
     code = _lib.xca_decompressed_size(source, len(data), ctypes.byref(size))
     if code != 0:
         raise RuntimeError(_lib.xca_error_string(code).decode("utf-8"))
+    if size.value > max_output_size:
+        raise RuntimeError("decoded output exceeds the configured limit")
     output = (ctypes.c_uint8 * size.value)()
-    code = _lib.xca_decompress_into(source, len(data), output, size.value)
+    code = _lib.xca_decompress_into_with_limit(
+        source, len(data), output, size.value, max_output_size
+    )
     if code != 0:
         raise RuntimeError(_lib.xca_error_string(code).decode("utf-8"))
     return bytes(output)
