@@ -22,7 +22,11 @@ pub(crate) fn encode(input: &[u8]) -> Option<Vec<u8>> {
     }
     let lengths = code_lengths(&frequencies)?;
     let codes = canonical_codes(&lengths)?;
-    let bit_count: usize = input.iter().map(|&b| lengths[b as usize] as usize).sum();
+    let bit_count: usize = frequencies
+        .iter()
+        .zip(lengths.iter())
+        .map(|(&frequency, &length)| frequency as usize * length as usize)
+        .sum();
     let mut output = Vec::with_capacity(HEADER_SIZE + bit_count.div_ceil(8));
     output.extend_from_slice(&(input.len() as u32).to_le_bytes());
     output.extend_from_slice(&lengths);

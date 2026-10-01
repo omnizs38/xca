@@ -6,8 +6,8 @@ mod huffman;
 mod v4;
 pub(crate) use codec::crc32;
 pub use v4::{
-    analyze_archive, compress_stream, decompress_stream, ArchiveAnalysis, CompressionOptions,
-    StreamStats,
+    analyze_archive, compress_stream, decompress_stream, set_thread_limit, ArchiveAnalysis,
+    CompressionOptions, StreamStats,
 };
 const DEFAULT_OUTPUT_LIMIT: usize = 1 << 30;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
