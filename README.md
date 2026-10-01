@@ -1,6 +1,6 @@
 # XCA — eXtended Compression Algorithm
 
-XCA 0.12.2 is an independently implemented, dependency-free lossless compression library and CLI written in Rust. It writes XCA8 and decodes XCA4 through XCA8.
+XCA 0.13.0 is an independently implemented, dependency-free lossless compression library and CLI written in Rust. It writes XCA8 and decodes XCA4 through XCA8.
 
 XCA8 has one unified adaptive compression profile. There are no user-selectable XCA levels.
 
@@ -18,17 +18,17 @@ For every input, XCA automatically applies the same decision pipeline:
 
 This removes tuning ambiguity: the same `compress` operation is used for small files, binaries, logs, snapshots, and repeated corpora.
 
-## XCA 0.12.2 highlights
+## XCA 0.13.0 highlights
 
 - new XCA8 unified-profile format;
 - removed levels from the Rust API, C API, CLI, benchmark harness, and stream options;
 - one deterministic balanced search policy;
 - long-range references across the complete in-memory input;
 - adaptive fixed-block fallback when dedup coverage is below 1%;
-- XCA6 Split Pulse for unique blocks;
+- XCA8 Split Pulse for unique blocks;
 - backward decoding compatibility with XCA4–XCA7;
 - direct memory-mapped file input and decompression output on Windows and Unix;
-- allocation-free `decompress_into` for caller-owned memory;
+- `decompress_into` avoids allocating and copying a second full-size output buffer;
 - adaptive parallel output assembly directly into files and external buffers;
 - validation-only `check` without constructing the complete restored output;
 - simple Rust file helpers plus C, C++, and Python integration layers;
@@ -36,8 +36,11 @@ This removes tuning ambiguity: the same `compress` operation is used for small f
 - same-file detection for paths, symbolic links, and hard links;
 - native-CPU strict release builds with full LTO;
 - collision-free split library/CLI build scripts for MSVC;
-- 22 strict adversarial, determinism, reference, corruption, file, and boundary tests;
-- verified XCA/Zstandard/LZ4/LZMA2 PowerShell benchmark suite;
+- byte-identical faster CRC, CDC, Huffman accounting, and Pulse match finding;
+- reusable worker-local match workspaces and a direct single-worker path;
+- explicit thread limits through Rust and `XCA_THREADS`;
+- 28 strict adversarial, determinism, reference, corruption, file, and boundary tests;
+- reproducible pinned XCA/Zstandard/LZ4/XZ benchmark automation on Windows, Linux, and macOS;
 - no third-party runtime or compression dependencies.
 
 See [ALGORITHM.md](ALGORITHM.md) and [FORMAT.md](FORMAT.md).
@@ -91,15 +94,20 @@ Add `-Native` for a machine-optimized binary. Building library and CLI targets s
 
 `CompressionOptions` contains only `block_size`. `compress_stream` uses the same unified block codec but keeps independent fixed blocks because arbitrary backward references require retained input history. In-memory `compress` enables global deduplication.
 
+`set_thread_limit(n)` limits in-memory compression and decompression workers; `0` restores automatic parallelism. The CLI reads the equivalent `XCA_THREADS` environment variable and requires a positive integer.
+
 ## Strict cross-engine benchmark
 
-```powershell
-powershell -ExecutionPolicy Bypass -File .\scripts\strict-test.ps1 `
-    -BenchmarkInput .\benchmark-large.bin `
-    -Iterations 7
+```bash
+python scripts/bench.py doctor
+python scripts/bench.py setup --suite quick
+python scripts/bench.py run --suite quick
+python scripts/bench.py run --suite full --baseline v0.12.2
 ```
 
-The benchmark produces one `XCA Unified` row and compares it with explicitly named Zstandard, LZ4, and LZMA2 configurations. Every decompressed result is verified with SHA-256.
+`setup` downloads pinned Zstandard, LZ4, XZ, Canterbury, and (for `full`) Silesia artifacts, verifies their committed SHA-256 values, and builds native tools without installing anything globally. Add `--offline` to require a populated cache.
+
+`run` compares single-thread and automatic CPU profiles, records every raw timing, median and IQR, verifies restored files with SHA-256 outside timed regions, and writes `raw.csv`, `summary.csv`, `metadata.json`, and `report.md` under `.bench-cache/runs/`. The metadata includes tool versions and binary hashes.
 
 ## Cleanup
 

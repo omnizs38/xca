@@ -1,4 +1,5 @@
 /target/
+/.bench-cache/
 fuzz/target/
 fuzz/artifacts/
 *.xca

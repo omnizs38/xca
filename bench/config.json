@@ -1,0 +1,11 @@
+{
+  "schema": 1,
+  "quick": {"warmups": 1, "iterations": 5, "corpora": ["synthetic", "canterbury"], "profiles": ["single", "auto"]},
+  "full": {"warmups": 2, "iterations": 9, "corpora": ["synthetic", "canterbury", "silesia"], "profiles": ["single", "auto"]},
+  "engines": {
+    "xca": {"label": "XCA Unified"},
+    "zstd": {"label": "Zstandard 1.5.7 level 3"},
+    "lz4": {"label": "LZ4 1.10.0 default"},
+    "xz": {"label": "XZ 5.8.4 level 6"}
+  }
+}

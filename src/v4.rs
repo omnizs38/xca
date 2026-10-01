@@ -1,6 +1,7 @@
 use crate::{crc32, huffman, Error, FrameInfo, Method};
 use std::collections::HashMap;
 use std::io::{Read, Write};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::thread;
 const MAGIC_V4: &[u8; 4] = b"XCA4";
 const MAGIC_V5: &[u8; 4] = b"XCA5";
@@ -28,8 +29,24 @@ const HS: usize = 1 << 16;
 const MAX_D: usize = u16::MAX as usize;
 const MIN_M: usize = 4;
 const MAX_M: usize = u16::MAX as usize;
-const NONE: usize = usize::MAX;
 const UNIFIED_DEPTH: usize = 16;
+const NONE_POSITION: u32 = u32::MAX;
+static THREAD_LIMIT: AtomicUsize = AtomicUsize::new(0);
+
+pub fn set_thread_limit(limit: usize) {
+    THREAD_LIMIT.store(limit, Ordering::Relaxed);
+}
+
+fn worker_count(tasks: usize) -> usize {
+    let available = thread::available_parallelism().map_or(1, |value| value.get());
+    let limit = THREAD_LIMIT.load(Ordering::Relaxed);
+    let requested = if limit == 0 {
+        available
+    } else {
+        available.min(limit)
+    };
+    requested.min(tasks.max(1))
+}
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressionOptions {
     pub block_size: usize,
@@ -135,36 +152,53 @@ pub fn compress_slice(input: &[u8]) -> Result<Vec<u8>, Error> {
         .max()
         .unwrap_or(options.block_size)
         .max(MIN_BLOCK);
-    let workers = thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .min(count.max(1));
-    let blocks = thread::scope(|scope| {
-        let mut handles = Vec::new();
-        let ranges = &ranges;
-        let references = &references;
-        for worker in 0..workers {
-            handles.push(scope.spawn(move || {
-                let mut local = Vec::new();
-                for index in (worker..count).step_by(workers) {
-                    let (start, end) = ranges[index];
-                    let data = &input[start..end];
-                    let block = match references[index] {
-                        Some(target) => reference_block(data, target),
-                        None => encode_block(data),
-                    };
-                    local.push((index, block));
-                }
-                local
-            }));
-        }
-        let mut ordered: Vec<Option<EncodedBlock>> = (0..count).map(|_| None).collect();
-        for handle in handles {
-            for (index, block) in handle.join().expect("XCA worker panicked") {
-                ordered[index] = Some(block);
+    let workers = worker_count(count);
+    let mut blocks = if workers == 1 {
+        let mut workspace = MatchWorkspace::new();
+        ranges
+            .iter()
+            .enumerate()
+            .map(|(index, &(start, end))| match references[index] {
+                Some(target) => reference_block(end - start, target),
+                None => encode_block(&input[start..end], &mut workspace),
+            })
+            .collect::<Vec<_>>()
+    } else {
+        thread::scope(|scope| {
+            let mut handles = Vec::new();
+            let ranges = &ranges;
+            let references = &references;
+            for worker in 0..workers {
+                handles.push(scope.spawn(move || {
+                    let mut local = Vec::new();
+                    let mut workspace = MatchWorkspace::new();
+                    for index in (worker..count).step_by(workers) {
+                        let (start, end) = ranges[index];
+                        let block = match references[index] {
+                            Some(target) => reference_block(end - start, target),
+                            None => encode_block(&input[start..end], &mut workspace),
+                        };
+                        local.push((index, block));
+                    }
+                    local
+                }));
             }
+            let mut ordered: Vec<Option<EncodedBlock>> = (0..count).map(|_| None).collect();
+            for handle in handles {
+                for (index, block) in handle.join().expect("XCA worker panicked") {
+                    ordered[index] = Some(block);
+                }
+            }
+            ordered.into_iter().map(Option::unwrap).collect::<Vec<_>>()
+        })
+    };
+    for index in 0..blocks.len() {
+        if blocks[index].method == REFERENCE {
+            let target =
+                u32::from_le_bytes(blocks[index].payload[..4].try_into().unwrap()) as usize;
+            blocks[index].checksum = blocks[target].checksum;
         }
-        ordered.into_iter().map(Option::unwrap).collect::<Vec<_>>()
-    });
+    }
     let capacity = HEADER + BH + blocks.iter().map(|b| BH + b.payload.len()).sum::<usize>();
     let has_references = blocks.iter().any(|block| block.method == REFERENCE);
     let mut output = Vec::with_capacity(capacity);
@@ -312,9 +346,7 @@ fn decode_frame(
             });
         }
     }
-    let workers = thread::available_parallelism()
-        .map_or(1, |n| n.get())
-        .min(count.max(1));
+    let workers = worker_count(count);
     let decoded = thread::scope(|scope| {
         let mut handles = Vec::new();
         for worker in 0..workers {
@@ -515,7 +547,7 @@ fn content_defined_ranges(input: &[u8]) -> Vec<(usize, usize)> {
     for (position, &byte) in input.iter().enumerate() {
         hash = hash
             .rotate_left(1)
-            .wrapping_add(gear_value(byte))
+            .wrapping_add(GEAR_TABLE[byte as usize])
             .wrapping_mul(0x9e37_79b1);
         let length = position + 1 - start;
         if length >= CDC_MIN && (hash & CDC_MASK == 0 || length >= CDC_MAX) {
@@ -530,12 +562,22 @@ fn content_defined_ranges(input: &[u8]) -> Vec<(usize, usize)> {
     ranges
 }
 
-fn gear_value(byte: u8) -> u64 {
+const fn gear_value(byte: u8) -> u64 {
     let mut value = byte as u64 + 0x9e37_79b9_7f4a_7c15;
     value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
     value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
     value ^ (value >> 31)
 }
+const fn gear_table() -> [u64; 256] {
+    let mut table = [0u64; 256];
+    let mut index = 0;
+    while index < table.len() {
+        table[index] = gear_value(index as u8);
+        index += 1;
+    }
+    table
+}
+const GEAR_TABLE: [u64; 256] = gear_table();
 
 fn find_references(input: &[u8], ranges: &[(usize, usize)]) -> (Vec<Option<usize>>, usize) {
     let mut buckets: HashMap<u64, Vec<usize>> = HashMap::new();
@@ -582,22 +624,22 @@ struct EncodedBlock {
     payload: Vec<u8>,
     checksum: u32,
 }
-fn reference_block(input: &[u8], target: usize) -> EncodedBlock {
+fn reference_block(original: usize, target: usize) -> EncodedBlock {
     EncodedBlock {
         method: REFERENCE,
         predictor: NONE_P,
-        original: input.len() as u32,
+        original: original as u32,
         payload: (target as u32).to_le_bytes().to_vec(),
-        checksum: crc32(input),
+        checksum: 0,
     }
 }
-fn encode_block(input: &[u8]) -> EncodedBlock {
+fn encode_block(input: &[u8], workspace: &mut MatchWorkspace) -> EncodedBlock {
     let predictor = choose(input);
     let packed = if predictor == NONE_P {
-        encode(input)
+        encode(input, workspace)
     } else {
         let transformed = transform(input, predictor);
-        encode(&transformed)
+        encode(&transformed, workspace)
     };
     let split = split_encode(&packed, input.len());
     let (method, payload) = match split {
@@ -657,6 +699,7 @@ pub fn compress_stream<R: Read, W: Write>(
         ..Default::default()
     };
     let mut b = vec![0; opt.block_size];
+    let mut workspace = MatchWorkspace::new();
     loop {
         let n = read_block(r, &mut b)?;
         if n == 0 {
@@ -665,10 +708,10 @@ pub fn compress_stream<R: Read, W: Write>(
         let input = &b[..n];
         let pred = choose(input);
         let packed = if pred == NONE_P {
-            encode(input)
+            encode(input, &mut workspace)
         } else {
             let transformed = transform(input, pred);
-            encode(&transformed)
+            encode(&transformed, &mut workspace)
         };
         let split = split_encode(&packed, input.len());
         let (m, owned) = match split {
@@ -1018,9 +1061,10 @@ fn choose(i: &[u8]) -> u8 {
         return NONE_P;
     }
     let s = &i[..n];
-    let raw = score(s, NONE_P);
-    let d = score(s, DELTA);
-    let x = score(s, XOR);
+    let mut table = [u16::MAX; 4096];
+    let raw = score(s, NONE_P, &mut table);
+    let d = score(s, DELTA, &mut table);
+    let x = score(s, XOR, &mut table);
     let margin = n / 64;
     if d > raw + margin && d >= x {
         DELTA
@@ -1039,11 +1083,11 @@ fn predicted(input: &[u8], position: usize, predictor: u8) -> u8 {
         input[position] ^ input[position - 1]
     }
 }
-fn score(input: &[u8], predictor: u8) -> usize {
+fn score(input: &[u8], predictor: u8, table: &mut [u16; 4096]) -> usize {
     if input.len() < 3 {
         return 0;
     }
-    let mut table = vec![NONE; 4096];
+    table.fill(u16::MAX);
     let mut result = 0;
     for position in 0..input.len() - 2 {
         let a = predicted(input, position, predictor);
@@ -1052,14 +1096,14 @@ fn score(input: &[u8], predictor: u8) -> usize {
         let hash =
             ((a as usize).wrapping_mul(251) ^ (b as usize).wrapping_mul(31) ^ c as usize) & 4095;
         let previous = table[hash];
-        if previous != NONE
-            && predicted(input, previous, predictor) == a
-            && predicted(input, previous + 1, predictor) == b
-            && predicted(input, previous + 2, predictor) == c
+        if previous != u16::MAX
+            && predicted(input, previous as usize, predictor) == a
+            && predicted(input, previous as usize + 1, predictor) == b
+            && predicted(input, previous as usize + 2, predictor) == c
         {
             result += 1;
         }
-        table[hash] = position;
+        table[hash] = position as u16;
     }
     result
 }
@@ -1102,65 +1146,102 @@ fn hash(i: &[u8], p: usize) -> usize {
     ((i[p] as usize).wrapping_mul(251) ^ (i[p + 1] as usize).wrapping_mul(31) ^ i[p + 2] as usize)
         & (HS - 1)
 }
-fn insert(i: &[u8], p: usize, h: &mut [usize], prev: &mut [usize]) {
+struct MatchWorkspace {
+    heads: Vec<u32>,
+    previous: Vec<u32>,
+}
+impl MatchWorkspace {
+    fn new() -> Self {
+        Self {
+            heads: vec![NONE_POSITION; HS],
+            previous: Vec::new(),
+        }
+    }
+
+    fn reset(&mut self, input_len: usize) {
+        debug_assert!(input_len <= u32::MAX as usize);
+        self.heads.fill(NONE_POSITION);
+        self.previous.resize(input_len, NONE_POSITION);
+    }
+}
+fn insert(i: &[u8], p: usize, h: &mut [u32], prev: &mut [u32]) {
     if p + 3 > i.len() {
         return;
     }
     let x = hash(i, p);
     prev[p] = h[x];
-    h[x] = p
+    h[x] = p as u32;
 }
-fn find(i: &[u8], p: usize, h: &[usize], prev: &[usize], md: usize) -> (usize, usize) {
+fn match_length(i: &[u8], left: usize, right: usize, max: usize) -> usize {
+    let mut length = 0;
+    while length + 8 <= max {
+        let a = u64::from_ne_bytes(i[left + length..left + length + 8].try_into().unwrap());
+        let b = u64::from_ne_bytes(i[right + length..right + length + 8].try_into().unwrap());
+        if a != b {
+            break;
+        }
+        length += 8;
+    }
+    while length < max && i[left + length] == i[right + length] {
+        length += 1;
+    }
+    length
+}
+fn find(i: &[u8], p: usize, h: &[u32], prev: &[u32], md: usize) -> (usize, usize) {
     if p + MIN_M > i.len() {
         return (0, 0);
     }
     let mut c = h[hash(i, p)];
     let (mut bd, mut bl, mut tries) = (0, 0, 0);
-    while c != NONE && tries < md {
-        let d = p - c;
+    while c != NONE_POSITION && tries < md {
+        let candidate = c as usize;
+        let d = p - candidate;
         if d > MAX_D {
             break;
         }
         let max = MAX_M.min(i.len() - p);
-        let mut l = 0;
-        while l < max && i[c + l] == i[p + l] {
-            l += 1;
+        if bl < max && i[candidate + bl] != i[p + bl] {
+            c = prev[candidate];
+            tries += 1;
+            continue;
         }
-        if l > bl && l >= MIN_M {
-            bl = l;
+        let length = match_length(i, candidate, p, max);
+        if length > bl && length >= MIN_M {
+            bl = length;
             bd = d;
-            if l == max {
+            if length == max {
                 break;
             }
         }
-        c = prev[c];
-        tries += 1
+        c = prev[candidate];
+        tries += 1;
     }
     (bd, bl)
 }
-fn encode(i: &[u8]) -> Vec<u8> {
+fn encode(i: &[u8], workspace: &mut MatchWorkspace) -> Vec<u8> {
     let mut o = Vec::with_capacity(i.len());
-    let mut h = vec![NONE; HS];
-    let mut prev = vec![NONE; i.len()];
+    workspace.reset(i.len());
+    let h = &mut workspace.heads;
+    let prev = &mut workspace.previous;
     let (mut p, mut lit) = (0, 0);
     while p < i.len() {
-        let (d, l) = find(i, p, &h, &prev, UNIFIED_DEPTH);
+        let (d, l) = find(i, p, h, prev, UNIFIED_DEPTH);
         if l >= MIN_M {
             literals(&mut o, &i[lit..p]);
             match_token(&mut o, d, l);
             let mut x = p;
             while x < p + l {
-                insert(i, x, &mut h, &mut prev);
-                x += 1
+                insert(i, x, h, prev);
+                x += 1;
             }
             p += l;
-            lit = p
+            lit = p;
         } else {
-            insert(i, p, &mut h, &mut prev);
+            insert(i, p, h, prev);
             p += 1;
             if p - lit == 128 {
                 literals(&mut o, &i[lit..p]);
-                lit = p
+                lit = p;
             }
         }
     }
@@ -1693,5 +1774,76 @@ mod tests {
             assert_ne!(method, END);
             cursor += BH + packed;
         }
+    }
+
+    #[test]
+    fn thread_limit_does_not_change_archive_bytes() {
+        let mut data = Vec::new();
+        for index in 0..80_000 {
+            data.extend_from_slice(
+                format!(
+                    "{{\"id\":{index},\"bucket\":{},\"message\":\"stable\"}}\n",
+                    index % 97
+                )
+                .as_bytes(),
+            );
+        }
+        set_thread_limit(1);
+        let single = compress_slice(&data).unwrap();
+        set_thread_limit(2);
+        let parallel = compress_slice(&data).unwrap();
+        set_thread_limit(0);
+        assert_eq!(single, parallel);
+        assert_eq!(decompress_slice(&parallel, data.len()).unwrap(), data);
+    }
+
+    #[test]
+    fn adversarial_cdc_shifts_and_near_duplicates_round_trip() {
+        let base: Vec<u8> = (0..700_000)
+            .map(|index| ((index * 41 + index / 127) & 0xff) as u8)
+            .collect();
+        let mut data = Vec::new();
+        for shift in [1usize, 15, 255, 4095] {
+            data.extend(std::iter::repeat_n(shift as u8, shift));
+            data.extend_from_slice(&base);
+            let mut changed = base.clone();
+            for index in (0..changed.len()).step_by(65_521) {
+                changed[index] ^= 0x5a;
+            }
+            data.extend_from_slice(&changed);
+        }
+        let archive = compress_slice(&data).unwrap();
+        assert_eq!(decompress_slice(&archive, data.len()).unwrap(), data);
+    }
+
+    #[test]
+    fn periodicity_and_distance_boundaries_round_trip() {
+        for copies in [63usize, 64, 65, 127] {
+            let mut data = b"periodic-boundary".repeat(copies);
+            data.extend_from_slice(b"tail");
+            let archive = compress_slice(&data).unwrap();
+            assert_eq!(decompress_slice(&archive, data.len()).unwrap(), data);
+        }
+        for distance in [65_534usize, 65_535, 65_536] {
+            let mut data = vec![0xa5; distance];
+            let repeated = data[..4096].to_vec();
+            data.extend_from_slice(&repeated);
+            let archive = compress_slice(&data).unwrap();
+            assert_eq!(decompress_slice(&archive, data.len()).unwrap(), data);
+        }
+    }
+
+    #[test]
+    fn slice_buffer_and_stream_decoders_agree() {
+        let data = b"differential decoder path ".repeat(30_000);
+        let archive = compress_slice(&data).unwrap();
+        let slice = decompress_slice(&archive, data.len()).unwrap();
+        let mut caller_owned = vec![0; data.len()];
+        decompress_into_slice(&archive, &mut caller_owned, data.len()).unwrap();
+        let mut stream = Vec::new();
+        decompress_stream(&mut archive.as_slice(), &mut stream, data.len()).unwrap();
+        assert_eq!(slice, data);
+        assert_eq!(caller_owned, data);
+        assert_eq!(stream, data);
     }
 }

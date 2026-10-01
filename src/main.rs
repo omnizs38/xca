@@ -2,14 +2,27 @@ use std::{env, fs, process, time::Instant};
 
 fn usage(program: &str) {
     eprintln!(
-        "Usage:\n  {program} compress <input> <output>\n  {program} decompress <input> <output>\n  {program} check <input>\n  {program} info <input>\n  {program} analyze <archive>\n  {program} bench <input> [iterations]"
+        "Usage:\n  {program} --version\n  {program} compress <input> <output>\n  {program} decompress <input> <output>\n  {program} check <input>\n  {program} info <input>\n  {program} analyze <archive>\n  {program} bench <input> [iterations]"
     );
 }
 
 fn run() -> Result<(), Box<dyn std::error::Error>> {
+    if let Some(value) = env::var_os("XCA_THREADS") {
+        let value = value
+            .to_str()
+            .ok_or("XCA_THREADS must be valid UTF-8")?
+            .parse::<usize>()?;
+        if value == 0 {
+            return Err("XCA_THREADS must be greater than zero".into());
+        }
+        xca::set_thread_limit(value);
+    }
     let args: Vec<String> = env::args().collect();
     let program = args.first().map(String::as_str).unwrap_or("xca");
     match args.get(1).map(String::as_str) {
+        Some("--version" | "-V") if args.len() == 2 => {
+            println!("xca {}", xca::VERSION);
+        }
         Some("compress") if args.len() == 4 => {
             let stats = xca::compress_file(&args[2], &args[3])?;
             eprintln!(

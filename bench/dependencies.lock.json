@@ -1,0 +1,24 @@
+{
+  "schema": 1,
+  "tools": {
+    "zstd": {
+      "version": "1.5.7",
+      "unix": {"url": "https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-1.5.7.tar.gz", "sha256": "eb33e51f49a15e023950cd7825ca74a4a2b43db8354825ac24fc1b7ee09e6fa3", "binary": "programs/zstd"},
+      "windows-x86_64": {"url": "https://github.com/facebook/zstd/releases/download/v1.5.7/zstd-v1.5.7-win64.zip", "sha256": "acb4e8111511749dc7a3ebedca9b04190e37a17afeb73f55d4425dbf0b90fad9", "binary": "zstd-v1.5.7-win64/zstd.exe"}
+    },
+    "lz4": {
+      "version": "1.10.0",
+      "unix": {"url": "https://github.com/lz4/lz4/releases/download/v1.10.0/lz4-1.10.0.tar.gz", "sha256": "537512904744b35e232912055ccf8ec66d768639ff3abe5788d90d792ec5f48b", "binary": "lz4"},
+      "windows-x86_64": {"url": "https://github.com/lz4/lz4/releases/download/v1.10.0/lz4_win64_v1_10_0.zip", "sha256": "8cb562a53189dfc8a53ec12469b91f1b51a5075036061a86b55738183bf4ab74", "binary": "lz4.exe"}
+    },
+    "xz": {
+      "version": "5.8.4",
+      "unix": {"url": "https://github.com/tukaani-project/xz/releases/download/v5.8.4/xz-5.8.4.tar.gz", "sha256": "0014c7886930454fe8bd4228665b51af55eeae560ea135c9c4cd33f55b2591d9", "binary": "src/xz/xz"},
+      "windows-x86_64": {"url": "https://github.com/tukaani-project/xz/releases/download/v5.8.4/xz-5.8.4-windows.zip", "sha256": "f31af7638391ecf286d48bc8555ce6e131691a1c52a9e44303bce57069e9de56", "binary": "bin_x86-64/xz.exe"}
+    }
+  },
+  "corpora": {
+    "canterbury": {"suite": "quick", "url": "https://corpus.canterbury.ac.nz/resources/cantrbry.tar.gz", "sha256": "f140e8a5b73d3f53198555a63bfb827889394a42f20825df33c810c3d5e3f8fb"},
+    "silesia": {"suite": "full", "url": "https://sun.aei.polsl.pl/~sdeor/corpus/silesia.zip", "sha256": "0626e25f45c0ffb5dc801f13b7c82a3b75743ba07e3a71835a41e3d9f63c77af"}
+  }
+}

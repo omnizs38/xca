@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.13.0 — 2026-10-02
+
+- Added a cross-platform benchmark runner with pinned tool and corpus downloads, SHA-256 validation, safe local extraction, offline caching, fixed single/automatic CPU profiles, raw timings, median/IQR summaries, environment metadata, and baseline-ref comparisons.
+- Replaced platform-specific benchmark logic with thin PowerShell and shell wrappers around the shared Python runner.
+- Added slicing-by-8 CRC-32, a precomputed CDC gear table, frequency-based Huffman bit accounting, compact reusable `u32` match workspaces, fast match comparison, and a no-thread small-input path.
+- Reused target checksums while encoding long-range reference blocks.
+- Added `set_thread_limit` and CLI `XCA_THREADS` support for controlled comparisons.
+- Preserved byte-identical XCA8 output versus 0.12.2 across synthetic mixed, random, periodic, numeric, and near-duplicate corpora.
+- Added CDC-shift, near-duplicate, periodicity, distance-boundary, thread-determinism, and decoder-path differential tests plus a compression round-trip fuzz target.
+- Clarified that caller-owned decode avoids a second full-size output allocation but can still allocate internal block workspaces.
+
 ## 0.12.2 — 2026-09-30
 
 - Changed file compression and decompression to write through a same-directory temporary file and atomically replace the destination only after successful flush and validation.

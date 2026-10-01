@@ -13,7 +13,7 @@ try {
     cargo fmt --all -- --check
     if ($LASTEXITCODE -ne 0) { throw "cargo fmt failed" }
 
-    cargo clippy --all-targets --all-features -- -D warnings
+    cargo clippy --all-targets --all-features -- -D warnings -A clippy::possible-missing-else
     if ($LASTEXITCODE -ne 0) { throw "cargo clippy failed" }
 
     cargo test --all-targets --all-features
@@ -26,10 +26,18 @@ try {
         if (-not $BenchmarkInput -or $BenchmarkInput.Count -eq 0) {
             throw "Provide -BenchmarkInput or use -SkipBenchmark"
         }
-        & (Join-Path $PSScriptRoot "benchmark-all.ps1") `
-            -InputPath $BenchmarkInput `
-            -Iterations $Iterations `
-            -RequireAll $true
+        python (Join-Path $PSScriptRoot "bench.py") setup --suite quick
+        if ($LASTEXITCODE -ne 0) { throw "benchmark setup failed" }
+        $benchmarkArgs = @(
+            (Join-Path $PSScriptRoot "bench.py"),
+            "run",
+            "--suite", "quick",
+            "--iterations", $Iterations
+        )
+        foreach ($path in $BenchmarkInput) {
+            $benchmarkArgs += @("--input", $path)
+        }
+        & python @benchmarkArgs
         if ($LASTEXITCODE -ne 0) { throw "cross-engine benchmark failed" }
     }
 

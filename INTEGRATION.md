@@ -18,7 +18,8 @@ let restored = xca::decompress_file("output.xca", "restored.bin")?;
 
 Both return `FileStats { input_bytes, output_bytes }`.
 The file helpers memory-map inputs and decode directly into the destination file,
-avoiding a full-size intermediate output allocation and copy.
+avoiding a second full-size output allocation and copy. Internal block and
+decoder workspaces may still allocate.
 
 ## Caller-owned output
 

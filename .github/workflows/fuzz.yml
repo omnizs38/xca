@@ -16,4 +16,5 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: dtolnay/rust-toolchain@be39649afda95dbf70f87cce95f68b8d5797b296 # nightly
       - run: cargo install cargo-fuzz --locked
-      - run: cargo fuzz run decompress -- -max_total_time=60 -max_len=1048576
+      - run: cargo fuzz run decompress -- -max_total_time=180 -max_len=1048576
+      - run: cargo fuzz run round_trip -- -max_total_time=180 -max_len=2097152
