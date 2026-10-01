@@ -145,6 +145,8 @@ pub unsafe extern "C" fn xca_decompressed_size(
     if output_len.is_null() {
         return 1;
     }
+    // SAFETY: output_len was checked and the caller guarantees writability.
+    unsafe { output_len.write(0) };
     let Some(input) = input_slice(data, len) else {
         return 1;
     };
@@ -265,6 +267,16 @@ mod tests {
         assert_eq!(output.len, 0);
 
         unsafe { xca_buffer_free(&mut output) };
+    }
+
+    #[test]
+    fn decompressed_size_clears_output_on_failure() {
+        let invalid = b"not an archive";
+        let mut output_len = usize::MAX;
+        let code =
+            unsafe { xca_decompressed_size(invalid.as_ptr(), invalid.len(), &mut output_len) };
+        assert_eq!(code, 3);
+        assert_eq!(output_len, 0);
     }
 
     #[test]

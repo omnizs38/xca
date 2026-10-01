@@ -16,9 +16,14 @@ inline std::vector<std::uint8_t> compress(const std::uint8_t *data, std::size_t 
     XcaBuffer output{nullptr, 0};
     const auto code = xca_compress(data, size, &output);
     if (code != 0) throw std::runtime_error(xca_error_string(code));
-    std::vector<std::uint8_t> result(output.data, output.data + output.len);
-    xca_buffer_free(&output);
-    return result;
+    try {
+        std::vector<std::uint8_t> result(output.data, output.data + output.len);
+        xca_buffer_free(&output);
+        return result;
+    } catch (...) {
+        xca_buffer_free(&output);
+        throw;
+    }
 }
 
 inline std::vector<std::uint8_t> decompress(

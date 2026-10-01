@@ -41,7 +41,7 @@ This removes tuning ambiguity: the same `compress` operation is used for small f
 - reusable worker-local match workspaces and a direct single-worker path;
 - per-call `EncodeOptions` / `DecodeOptions`, plus CLI `XCA_THREADS`;
 - explicit output limits in Rust, C, C++, and Python;
-- 34 strict adversarial, compatibility, streaming, determinism, reference, corruption, file, and boundary tests;
+- 37 strict adversarial, compatibility, streaming, entropy-tail, determinism, reference, corruption, file, and boundary tests;
 - reproducible pinned XCA/Zstandard/LZ4/XZ benchmark automation on Windows, Linux, and macOS;
 - no third-party runtime or compression dependencies.
 
