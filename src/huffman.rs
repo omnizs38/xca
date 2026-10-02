@@ -189,6 +189,15 @@ pub(crate) fn decode_limited(input: &[u8], limit: usize) -> Result<Vec<u8>, Erro
             }
         }
     }
+    // The encoder pads only the final byte with at most seven zero bits. Reject
+    // extra bytes and non-zero padding so corruption cannot hide after the
+    // requested symbol count has already been produced.
+    if position != payload.len() || bits > 7 {
+        return Err(Error::TrailingData);
+    }
+    if bits != 0 && buffer & ((1u64 << bits) - 1) != 0 {
+        return Err(Error::InvalidEntropyData);
+    }
     Ok(output)
 }
 
@@ -326,5 +335,21 @@ mod tests {
             super::decode_limited(&encoded, 1024),
             Err(crate::Error::OutputLimitExceeded { .. })
         ));
+    }
+
+    #[test]
+    fn rejects_extra_entropy_bytes() {
+        let input = b"strict entropy tail".repeat(1024);
+        let mut encoded = encode(&input).unwrap();
+        encoded.push(0);
+        assert!(decode(&encoded).is_err());
+    }
+
+    #[test]
+    fn rejects_nonzero_padding_bits() {
+        let input = vec![b'X'; 9];
+        let mut encoded = encode(&input).unwrap();
+        *encoded.last_mut().unwrap() |= 1;
+        assert!(decode(&encoded).is_err());
     }
 }

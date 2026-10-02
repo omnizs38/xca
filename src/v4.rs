@@ -408,29 +408,25 @@ fn decode_direct(
     output: &mut [u8],
 ) -> Result<(), Error> {
     let workers = worker_count(descriptors.len());
-    let mut index = 0usize;
-    while index < descriptors.len() {
-        if descriptors[index].method == REFERENCE {
-            let target = reference_target(descriptors, index)?;
-            copy_reference(output, offsets, index, target);
-            index += 1;
+    let mut next = 0usize;
+    while next < descriptors.len() {
+        let mut indices = Vec::with_capacity(workers);
+        while next < descriptors.len() && indices.len() < workers {
+            if descriptors[next].method != REFERENCE {
+                indices.push(next);
+            }
+            next += 1;
+        }
+        if indices.is_empty() {
             continue;
         }
-
-        let mut end = index + 1;
-        while end < descriptors.len()
-            && descriptors[end].method != REFERENCE
-            && end - index < workers
-        {
-            end += 1;
-        }
-        let decoded = if end - index == 1 {
-            vec![decode_block(descriptors[index])?]
+        let decoded = if indices.len() == 1 {
+            vec![decode_block(descriptors[indices[0]])?]
         } else {
             thread::scope(|scope| {
-                let mut handles = Vec::with_capacity(end - index);
-                for descriptor in &descriptors[index..end] {
-                    handles.push(scope.spawn(move || decode_block(*descriptor)));
+                let mut handles = Vec::with_capacity(indices.len());
+                for &index in &indices {
+                    handles.push(scope.spawn(move || decode_block(descriptors[index])));
                 }
                 let mut blocks = Vec::with_capacity(handles.len());
                 for handle in handles {
@@ -439,10 +435,18 @@ fn decode_direct(
                 Ok::<_, Error>(blocks)
             })?
         };
-        for (block_index, block) in (index..end).zip(decoded) {
+        for (block_index, block) in indices.into_iter().zip(decoded) {
             output[offsets[block_index]..offsets[block_index + 1]].copy_from_slice(&block);
         }
-        index = end;
+    }
+
+    // References are resolved only after every independent root is ready. This
+    // keeps reference-heavy archives parallel without retaining decoded blocks.
+    for (index, descriptor) in descriptors.iter().enumerate() {
+        if descriptor.method == REFERENCE {
+            let target = reference_target(descriptors, index)?;
+            copy_reference(output, offsets, index, target);
+        }
     }
     Ok(())
 }
@@ -581,13 +585,14 @@ const fn gear_table() -> [u64; 256] {
 const GEAR_TABLE: [u64; 256] = gear_table();
 
 fn find_references(input: &[u8], ranges: &[(usize, usize)]) -> (Vec<Option<usize>>, usize) {
-    let mut buckets: HashMap<u64, Vec<usize>> = HashMap::new();
+    const MAX_COLLISION_CANDIDATES: usize = 4;
+    let mut buckets: HashMap<(usize, u64), Vec<usize>> = HashMap::new();
     let mut references = vec![None; ranges.len()];
     let mut referenced_bytes = 0usize;
     for (index, &(start, end)) in ranges.iter().enumerate() {
         let data = &input[start..end];
-        let fingerprint = block_fingerprint(data);
-        let target = buckets.get(&fingerprint).and_then(|candidates| {
+        let key = (data.len(), block_fingerprint(data));
+        let target = buckets.get(&key).and_then(|candidates| {
             candidates.iter().copied().find(|&candidate| {
                 let (other_start, other_end) = ranges[candidate];
                 input[other_start..other_end] == *data
@@ -597,7 +602,10 @@ fn find_references(input: &[u8], ranges: &[(usize, usize)]) -> (Vec<Option<usize
             references[index] = Some(target);
             referenced_bytes += data.len();
         } else {
-            buckets.entry(fingerprint).or_default().push(index);
+            let candidates = buckets.entry(key).or_default();
+            if candidates.len() < MAX_COLLISION_CANDIDATES {
+                candidates.push(index);
+            }
         }
     }
     (references, referenced_bytes)

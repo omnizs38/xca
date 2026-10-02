@@ -3,6 +3,10 @@
 ## 0.14.0 — 2026-10-02
 
 - Reworked in-memory decoding to retain at most one worker window of decoded blocks before direct assembly.
+- Kept independent block decoding parallel across interleaved long-range references.
+- Bounded deduplication collision chains and keyed candidates by chunk length to avoid adversarial comparison growth.
+- Rejected extra Huffman bytes and non-zero tail padding after the expected symbol count.
+- Cleared C decoded-size outputs on failure and made the C++ compression wrapper exception-safe.
 - Made `check` validate blocks sequentially without retaining the complete restored output.
 - Unified slice structural parsing for decode and `frame_info`, including strict terminator validation.
 - Added per-call `EncodeOptions` and `DecodeOptions` while preserving the legacy global thread setter.
