@@ -16,4 +16,10 @@ fuzz_target!(|data: &[u8]| {
         &mut streamed,
         FUZZ_OUTPUT_LIMIT,
     );
+    let mut exact = Vec::new();
+    let _ = xca::decompress_stream_exact(
+        &mut Cursor::new(data),
+        &mut exact,
+        FUZZ_OUTPUT_LIMIT,
+    );
 });

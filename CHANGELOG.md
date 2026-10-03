@@ -13,6 +13,10 @@
 - Made empty C outputs canonical `{NULL, 0}` and added allocation error code 6.
 - Switched CLI `check`, `info`, and `analyze` to memory-mapped file helpers and fixed 32-bit ratio accounting.
 - Converted scoped worker creation failures into I/O errors and joined every worker before reporting panic failures.
+- Split streaming decode into frame-bounded `decompress_stream` and EOF-validating `decompress_stream_exact`, preventing sockets from blocking after a complete frame.
+- Made remaining decoder worker and Huffman lookup allocations fallible.
+- Created Unix temporary output files with mode `0600` before any data is written.
+- Added structure-aware mutation fuzzing over real encoded archives and verified the i686 build.
 - Made `analyze_archive` verify reconstructed CRCs instead of reporting statistics for corrupted payloads.
 - Bounded reconstructed Split Pulse size before every write.
 - Fixed temporary-file leaks on metadata/permission errors and prevented false failure reports after a successful Unix rename commit point.

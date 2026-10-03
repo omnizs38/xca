@@ -1,8 +1,8 @@
 use std::io::Cursor;
 
 use xca::{
-    compress, compress_stream, decompress, decompress_stream, decompress_with_options, frame_info,
-    CompressionOptions, DecodeOptions, Error,
+    compress, compress_stream, decompress, decompress_stream, decompress_stream_exact,
+    decompress_with_options, frame_info, CompressionOptions, DecodeOptions, Error,
 };
 
 #[test]
@@ -25,9 +25,27 @@ fn streaming_decoder_rejects_trailing_data() {
     archive.push(0xaa);
     let mut output = Vec::new();
     assert!(matches!(
-        decompress_stream(&mut Cursor::new(archive), &mut output, 1024),
+        decompress_stream_exact(&mut Cursor::new(archive), &mut output, 1024),
         Err(Error::TrailingData)
     ));
+}
+
+#[test]
+fn streaming_decoder_stops_at_frame_boundary_without_waiting_for_eof() {
+    let mut archive = Vec::new();
+    compress_stream(
+        &mut Cursor::new(b"framed stream"),
+        &mut archive,
+        CompressionOptions::default(),
+    )
+    .unwrap();
+    let frame_len = archive.len();
+    archive.extend_from_slice(b"next frame or protocol data");
+    let mut reader = Cursor::new(archive);
+    let mut output = Vec::new();
+    decompress_stream(&mut reader, &mut output, 1024).unwrap();
+    assert_eq!(reader.position() as usize, frame_len);
+    assert_eq!(output, b"framed stream");
 }
 
 #[test]

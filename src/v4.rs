@@ -484,7 +484,7 @@ fn decode_direct(
     let workers = worker_count(descriptors.len());
     let mut next = 0usize;
     while next < descriptors.len() {
-        let mut indices = Vec::with_capacity(workers);
+        let mut indices = try_with_capacity(workers)?;
         let mut batch_bytes = 0usize;
         while next < descriptors.len() && indices.len() < workers {
             if descriptors[next].method == REFERENCE {
@@ -508,7 +508,7 @@ fn decode_direct(
             vec![decode_block(descriptors[indices[0]])?]
         } else {
             thread::scope(|scope| {
-                let mut handles = Vec::with_capacity(indices.len());
+                let mut handles = try_with_capacity(indices.len())?;
                 for &index in &indices {
                     handles.push(
                         thread::Builder::new()
@@ -516,7 +516,7 @@ fn decode_direct(
                             .map_err(ioe)?,
                     );
                 }
-                let mut results = Vec::with_capacity(handles.len());
+                let mut results = try_with_capacity(handles.len())?;
                 let mut worker_panicked = false;
                 for handle in handles {
                     match handle.join() {
@@ -856,6 +856,23 @@ pub fn decompress_stream<R: Read, W: Write>(
     w: &mut W,
     limit: usize,
 ) -> Result<StreamStats, Error> {
+    decompress_stream_impl(r, w, limit, false)
+}
+
+pub fn decompress_stream_exact<R: Read, W: Write>(
+    r: &mut R,
+    w: &mut W,
+    limit: usize,
+) -> Result<StreamStats, Error> {
+    decompress_stream_impl(r, w, limit, true)
+}
+
+fn decompress_stream_impl<R: Read, W: Write>(
+    r: &mut R,
+    w: &mut W,
+    limit: usize,
+    require_eof: bool,
+) -> Result<StreamStats, Error> {
     let mut h = [0; HEADER];
     exact(r, &mut h)?;
     if &h[..4] != MAGIC_V4
@@ -935,9 +952,11 @@ pub fn decompress_stream<R: Read, W: Write>(
         add_stream_bytes(&mut st.output_bytes, n)?;
         st.blocks = st.blocks.checked_add(1).ok_or(Error::InputTooLarge)?
     }
-    let mut trailing = [0u8; 1];
-    if r.read(&mut trailing).map_err(ioe)? != 0 {
-        return Err(Error::TrailingData);
+    if require_eof {
+        let mut trailing = [0u8; 1];
+        if r.read(&mut trailing).map_err(ioe)? != 0 {
+            return Err(Error::TrailingData);
+        }
     }
     Ok(st)
 }

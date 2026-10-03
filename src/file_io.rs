@@ -2,6 +2,8 @@ use crate::Error;
 use std::ffi::OsString;
 use std::fs::{self, File};
 use std::io::Write;
+#[cfg(unix)]
+use std::os::unix::fs::OpenOptionsExt;
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicU64, Ordering};
 
@@ -126,12 +128,11 @@ fn create_temporary_file(destination: &Path) -> Result<(PathBuf, File), Error> {
         temporary_name.push(file_name);
         temporary_name.push(format!(".xca-tmp-{}-{counter}", std::process::id()));
         let temporary_path = parent.join(temporary_name);
-        match fs::OpenOptions::new()
-            .read(true)
-            .write(true)
-            .create_new(true)
-            .open(&temporary_path)
-        {
+        let mut options = fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        options.mode(0o600);
+        match options.open(&temporary_path) {
             Ok(file) => {
                 let permissions = match fs::metadata(destination) {
                     Ok(metadata) => Some(metadata.permissions()),

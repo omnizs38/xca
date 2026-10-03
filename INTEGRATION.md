@@ -21,6 +21,9 @@ The file helpers memory-map inputs and decode directly into the destination file
 avoiding a second full-size output allocation and copy. Internal block and
 decoder workspaces may still allocate.
 
+
+For framed sockets or concatenated protocols, `decompress_stream` stops at the XCA terminator without waiting for the underlying reader to reach EOF. Use `decompress_stream_exact` for standalone files when trailing bytes must be rejected.
+
 ## Caller-owned output
 
 ```rust

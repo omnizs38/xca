@@ -12,12 +12,12 @@ struct TreeNode {
     symbol: Option<u8>,
 }
 
-fn try_output(capacity: usize) -> Result<Vec<u8>, Error> {
+fn try_vec<T>(capacity: usize) -> Result<Vec<T>, Error> {
     let mut output = Vec::new();
     output
         .try_reserve_exact(capacity)
         .map_err(|_| Error::AllocationFailed {
-            requested: capacity,
+            requested: capacity.saturating_mul(std::mem::size_of::<T>()),
         })?;
     Ok(output)
 }
@@ -84,7 +84,9 @@ pub(crate) fn decode_limited(input: &[u8], limit: usize) -> Result<Vec<u8>, Erro
     }
     let lengths: [u8; SYMBOLS] = input[4..HEADER_SIZE].try_into().unwrap();
     let codes = canonical_codes(&lengths).ok_or(Error::InvalidEntropyData)?;
-    let mut trie = vec![DecodeNode::default()];
+    let trie_capacity = 1 + SYMBOLS * usize::from(MAX_BITS);
+    let mut trie = try_vec(trie_capacity)?;
+    trie.push(DecodeNode::default());
     for (symbol, &(code, length)) in codes.iter().enumerate() {
         if length == 0 {
             continue;
@@ -110,7 +112,8 @@ pub(crate) fn decode_limited(input: &[u8], limit: usize) -> Result<Vec<u8>, Erro
 
     // A wide first-level table resolves the common case with one lookup. Codes
     // longer than TABLE_BITS continue through the compact binary trie.
-    let mut table = vec![INVALID; TABLE_SIZE];
+    let mut table = try_vec(TABLE_SIZE)?;
+    table.resize(TABLE_SIZE, INVALID);
     for (prefix, entry) in table.iter_mut().enumerate() {
         let mut node = 0usize;
         let mut consumed = 0u8;
@@ -135,7 +138,7 @@ pub(crate) fn decode_limited(input: &[u8], limit: usize) -> Result<Vec<u8>, Erro
     let mut position = 0usize;
     let mut bits = 0u8;
     let mut buffer = 0u64;
-    let mut output = try_output(expected)?;
+    let mut output = try_vec(expected)?;
     while output.len() < expected {
         while bits < TABLE_BITS && position < payload.len() {
             buffer = (buffer << 8) | payload[position] as u64;

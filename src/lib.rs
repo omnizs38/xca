@@ -6,8 +6,8 @@ mod huffman;
 mod v4;
 pub(crate) use codec::crc32;
 pub use v4::{
-    analyze_archive, compress_stream, decompress_stream, set_thread_limit, ArchiveAnalysis,
-    CompressionOptions, StreamStats,
+    analyze_archive, compress_stream, decompress_stream, decompress_stream_exact, set_thread_limit,
+    ArchiveAnalysis, CompressionOptions, StreamStats,
 };
 pub const DEFAULT_OUTPUT_LIMIT: usize = 1 << 30;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -304,6 +304,18 @@ mod tests {
         let compressed = compress_file(&source, &archive).unwrap();
         let decompressed = decompress_file(&archive, &restored).unwrap();
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&archive).unwrap().permissions().mode() & 0o077,
+                0
+            );
+            assert_eq!(
+                fs::metadata(&restored).unwrap().permissions().mode() & 0o077,
+                0
+            );
+        }
         assert_eq!(compressed.input_bytes, data.len() as u64);
         assert_eq!(decompressed.output_bytes, data.len() as u64);
         assert_eq!(fs::read(&restored).unwrap(), data);

@@ -43,7 +43,7 @@ This removes tuning ambiguity: the same `compress` operation is used for small f
 - explicit output and metadata limits in Rust, C, C++, and Python;
 - fallible untrusted-input allocations and a bounded parallel decode working set;
 - canonical overflow-safe varint parsing and cumulative Split Pulse budgets;
-- 44 strict adversarial, allocation, compatibility, streaming, entropy-tail, varint, determinism, reference, corruption, file, and boundary tests;
+- 45 strict adversarial, allocation, compatibility, streaming, entropy-tail, varint, determinism, reference, corruption, file, and boundary tests;
 - reproducible pinned XCA/Zstandard/LZ4/XZ benchmark automation on Windows, Linux, and macOS;
 - no third-party runtime or compression dependencies.
 
@@ -96,7 +96,7 @@ Add `-Native` for a machine-optimized binary. Building library and CLI targets s
 
 ## Streaming
 
-`CompressionOptions` contains only `block_size`. `compress_stream` writes independent fixed blocks. To guarantee bounded memory, `decompress_stream` rejects archives containing long-range references and rejects trailing bytes after the terminator. Use `decompress` or `decompress_into` for globally deduplicated in-memory archives.
+`CompressionOptions` contains only `block_size`. `compress_stream` writes independent fixed blocks. To guarantee bounded memory, stream decoding rejects archives containing long-range references. `decompress_stream` stops exactly at the frame terminator so it works with sockets and concatenated protocols; use `decompress_stream_exact` when the reader must also be at EOF. Use `decompress` or `decompress_into` for globally deduplicated in-memory archives.
 
 `EncodeOptions` and `DecodeOptions` provide per-call thread limits; zero selects automatic parallelism. The legacy process-wide `set_thread_limit` remains available for compatibility. The CLI reads `XCA_THREADS` and requires a positive integer.
 
