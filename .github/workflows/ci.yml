@@ -22,6 +22,9 @@ jobs:
       - run: cargo clippy --all-targets --all-features -- -D warnings -A clippy::possible-missing-else
       - run: cargo test --all-targets --all-features
       - run: cargo build --release --all-features
+      - run: python examples/python/basic.py
+      - if: runner.os == 'Linux'
+        run: cc examples/c/basic.c -Iinclude -Ltarget/release -lxca -o /tmp/xca-c-example && LD_LIBRARY_PATH=target/release /tmp/xca-c-example
       - run: cargo package --allow-dirty
       - run: python scripts/bench.py doctor
       - run: python -m py_compile scripts/bench.py

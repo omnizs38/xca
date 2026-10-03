@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.14.1 — 2026-10-02
+
+- Converted untrusted decode, entropy, descriptor, and output allocations into recoverable `AllocationFailed` errors.
+- Added a 64 MiB decoded-block budget per parallel batch to bound multicore working memory.
+- Added `frame_info_with_limit`, `check_with_limit`, and limit-aware C metadata inspection.
+- Fixed 32-bit streaming output-limit accounting after more than 4 GiB of cumulative output.
+- Bounded cumulative Split Pulse expansion while preserving valid distance-stream overhead.
+- Rejected overflowing and non-canonical variable-length integers.
+- Moved STORED/reference invariants and reference checksum checks into the shared frame parser.
+- Removed duplicate parsing from `check` and `analyze_archive`.
+- Made empty C outputs canonical `{NULL, 0}` and added allocation error code 6.
+- Switched CLI `check`, `info`, and `analyze` to memory-mapped file helpers and fixed 32-bit ratio accounting.
+- Added regression coverage for every corrected failure class, expanded fuzzing across metadata/check/analyze/stream APIs, and completed decoder/round-trip fuzz passes.
+- Added real C and Python ABI smoke tests to CI and fixed direct execution of the Python example.
+
 ## 0.14.0 — 2026-10-02
 
 - Reworked in-memory decoding to retain at most one worker window of decoded blocks before direct assembly.

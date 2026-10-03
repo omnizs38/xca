@@ -56,6 +56,13 @@ _lib.xca_decompressed_size.argtypes = [
     ctypes.POINTER(ctypes.c_size_t),
 ]
 _lib.xca_decompressed_size.restype = ctypes.c_int32
+_lib.xca_decompressed_size_with_limit.argtypes = [
+    ctypes.POINTER(ctypes.c_uint8),
+    ctypes.c_size_t,
+    ctypes.c_size_t,
+    ctypes.POINTER(ctypes.c_size_t),
+]
+_lib.xca_decompressed_size_with_limit.restype = ctypes.c_int32
 _lib.xca_decompress_into.argtypes = [
     ctypes.POINTER(ctypes.c_uint8),
     ctypes.c_size_t,
@@ -99,7 +106,9 @@ def decompress(data: bytes, *, max_output_size: int = 256 * 1024 * 1024) -> byte
         raise ValueError("max_output_size must be non-negative")
     source = (ctypes.c_uint8 * len(data)).from_buffer_copy(data)
     size = ctypes.c_size_t()
-    code = _lib.xca_decompressed_size(source, len(data), ctypes.byref(size))
+    code = _lib.xca_decompressed_size_with_limit(
+        source, len(data), max_output_size, ctypes.byref(size)
+    )
     if code != 0:
         raise RuntimeError(_lib.xca_error_string(code).decode("utf-8"))
     if size.value > max_output_size:

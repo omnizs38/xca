@@ -32,6 +32,7 @@ const MIN_M: usize = 4;
 const MAX_M: usize = u16::MAX as usize;
 const UNIFIED_DEPTH: usize = 16;
 const NONE_POSITION: u32 = u32::MAX;
+const MAX_PARALLEL_DECODE_BYTES: usize = 64 * 1024 * 1024;
 static THREAD_LIMIT: AtomicUsize = AtomicUsize::new(0);
 thread_local! {
     static CALL_THREAD_LIMIT: Cell<Option<usize>> = const { Cell::new(None) };
@@ -64,6 +65,40 @@ pub(crate) fn with_thread_limit<T>(limit: usize, operation: impl FnOnce() -> T) 
     }
     let _reset = Reset(previous);
     operation()
+}
+
+fn allocation_failed<T>(requested_items: usize) -> Error {
+    Error::AllocationFailed {
+        requested: requested_items.saturating_mul(std::mem::size_of::<T>()),
+    }
+}
+
+fn try_with_capacity<T>(capacity: usize) -> Result<Vec<T>, Error> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(capacity)
+        .map_err(|_| allocation_failed::<T>(capacity))?;
+    Ok(output)
+}
+
+fn try_zeroed(length: usize) -> Result<Vec<u8>, Error> {
+    let mut output = try_with_capacity(length)?;
+    output.resize(length, 0);
+    Ok(output)
+}
+
+fn try_copy(input: &[u8]) -> Result<Vec<u8>, Error> {
+    let mut output = try_with_capacity(input.len())?;
+    output.extend_from_slice(input);
+    Ok(output)
+}
+
+fn try_push<T>(output: &mut Vec<T>, value: T) -> Result<(), Error> {
+    output
+        .try_reserve(1)
+        .map_err(|_| allocation_failed::<T>(output.len().saturating_add(1)))?;
+    output.push(value);
+    Ok(())
 }
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CompressionOptions {
@@ -241,7 +276,7 @@ struct BlockDescriptor<'a> {
 fn decode_block(block: BlockDescriptor<'_>) -> Result<Vec<u8>, Error> {
     let mut decoded = match block.method {
         STORED if block.predictor == NONE_P && block.payload.len() == block.original => {
-            block.payload.to_vec()
+            try_copy(block.payload)?
         }
         PULSE => decode(block.payload, block.original, false)?,
         PULSE_HUFFMAN => {
@@ -276,8 +311,8 @@ pub fn decompress_into_slice(
 }
 
 pub fn verify_slice(input: &[u8], limit: usize) -> Result<usize, Error> {
-    let total = frame_info(input)?.original_size;
-    decode_frame(input, limit, None, false)?;
+    let (descriptors, _, total) = parse_frame(input, limit)?;
+    verify_blocks(&descriptors)?;
     Ok(total)
 }
 
@@ -307,8 +342,9 @@ fn parse_frame(
 
     let mut cursor = HEADER;
     let mut total = 0usize;
-    let mut descriptors = Vec::new();
-    let mut offsets = vec![0usize];
+    let mut descriptors = Vec::<BlockDescriptor<'_>>::new();
+    let mut offsets = try_with_capacity(1)?;
+    offsets.push(0usize);
     loop {
         if cursor + BH > input.len() {
             return Err(Error::Truncated);
@@ -352,17 +388,39 @@ fn parse_frame(
         if end > input.len() {
             return Err(Error::Truncated);
         }
-        if method == REFERENCE && input[5] & 2 == 0 {
+        if method == STORED && (predictor != NONE_P || packed != original) {
             return Err(Error::InvalidMatch);
         }
-        descriptors.push(BlockDescriptor {
-            method,
-            predictor,
-            original,
-            payload: &input[cursor..end],
-            checksum,
-        });
-        offsets.push(total);
+        if method == REFERENCE {
+            if input[5] & 2 == 0 || predictor != NONE_P || packed != 4 {
+                return Err(Error::InvalidMatch);
+            }
+            let target = u32::from_le_bytes(input[cursor..end].try_into().unwrap()) as usize;
+            let target_descriptor = descriptors.get(target).ok_or(Error::InvalidMatch)?;
+            if target_descriptor.original != original {
+                return Err(Error::LengthMismatch {
+                    expected: original,
+                    actual: target_descriptor.original,
+                });
+            }
+            if target_descriptor.checksum != checksum {
+                return Err(Error::ChecksumMismatch {
+                    expected: checksum,
+                    actual: target_descriptor.checksum,
+                });
+            }
+        }
+        try_push(
+            &mut descriptors,
+            BlockDescriptor {
+                method,
+                predictor,
+                original,
+                payload: &input[cursor..end],
+                checksum,
+            },
+        )?;
+        try_push(&mut offsets, total)?;
         cursor = end;
     }
     Ok((descriptors, offsets, total))
@@ -411,10 +469,20 @@ fn decode_direct(
     let mut next = 0usize;
     while next < descriptors.len() {
         let mut indices = Vec::with_capacity(workers);
+        let mut batch_bytes = 0usize;
         while next < descriptors.len() && indices.len() < workers {
-            if descriptors[next].method != REFERENCE {
-                indices.push(next);
+            if descriptors[next].method == REFERENCE {
+                next += 1;
+                continue;
             }
+            let block_bytes = descriptors[next].original;
+            if !indices.is_empty()
+                && batch_bytes.saturating_add(block_bytes) > MAX_PARALLEL_DECODE_BYTES
+            {
+                break;
+            }
+            indices.push(next);
+            batch_bytes = batch_bytes.saturating_add(block_bytes);
             next += 1;
         }
         if indices.is_empty() {
@@ -485,7 +553,7 @@ fn decode_frame(
         decode_direct(&descriptors, &offsets, output)?;
         return Ok(None);
     }
-    let mut output = vec![0u8; total];
+    let mut output = try_zeroed(total)?;
     decode_direct(&descriptors, &offsets, &mut output)?;
     Ok(Some(output))
 }
@@ -782,6 +850,7 @@ pub fn decompress_stream<R: Read, W: Write>(
         input_bytes: HEADER as u64,
         ..Default::default()
     };
+    let mut total_output = 0usize;
     loop {
         let mut h = [0; BH];
         exact(r, &mut h)?;
@@ -800,16 +869,14 @@ pub fn decompress_stream<R: Read, W: Write>(
         if n == 0 || n > bs || pn > n {
             return Err(Error::InvalidBlockSize(n));
         }
-        let total = (st.output_bytes as usize)
-            .checked_add(n)
-            .ok_or(Error::InputTooLarge)?;
-        if total > limit {
+        total_output = total_output.checked_add(n).ok_or(Error::InputTooLarge)?;
+        if total_output > limit {
             return Err(Error::OutputLimitExceeded {
-                requested: total,
+                requested: total_output,
                 limit,
             });
         }
-        let mut p = vec![0; pn];
+        let mut p = try_zeroed(pn)?;
         exact(r, &mut p)?;
         st.input_bytes += pn as u64;
         let mut data = match m {
@@ -842,145 +909,113 @@ pub fn decompress_stream<R: Read, W: Write>(
     Ok(st)
 }
 pub fn analyze_archive(input: &[u8]) -> Result<ArchiveAnalysis, Error> {
-    // Keep diagnostics structurally identical to normal decoding. The second
-    // pass below gathers token statistics without reconstructing output.
-    parse_frame(input, usize::MAX)?;
-    if input.len() < HEADER
-        || &input[..4] != MAGIC_V4
-            && &input[..4] != MAGIC_V5
-            && &input[..4] != MAGIC_V6
-            && &input[..4] != MAGIC_V7
-            && &input[..4] != MAGIC_V8
-    {
-        return Err(Error::BadMagic);
-    }
-    if !valid_profile(&input[..4], input[4]) {
-        return Err(Error::InvalidLevel(input[4]));
-    }
-    if !valid_flags(input[5..8].try_into().unwrap()) {
-        return Err(Error::InvalidEntropyData);
-    }
+    let (descriptors, _, original_size) = parse_frame(input, usize::MAX)?;
     let mut result = ArchiveAnalysis {
+        original_bytes: original_size as u64,
         archive_bytes: input.len() as u64,
+        blocks: u32::try_from(descriptors.len()).map_err(|_| Error::InputTooLarge)?,
         ..ArchiveAnalysis::default()
     };
-    let mut cursor = HEADER;
-    let mut originals = Vec::<usize>::new();
-    loop {
-        if cursor + BH > input.len() {
-            return Err(Error::Truncated);
-        }
-        let header = &input[cursor..cursor + BH];
-        cursor += BH;
-        let method = header[0];
-        let predictor = header[1];
-        let original = u32::from_le_bytes(header[2..6].try_into().unwrap()) as usize;
-        let packed = u32::from_le_bytes(header[6..10].try_into().unwrap()) as usize;
-        if method == END {
-            if original != 0 || packed != 0 || cursor != input.len() {
-                return Err(Error::TrailingData);
-            }
-            break;
-        }
-        let end = cursor.checked_add(packed).ok_or(Error::InputTooLarge)?;
-        if end > input.len() {
-            return Err(Error::Truncated);
-        }
-        result.blocks += 1;
-        result.original_bytes += original as u64;
-        match predictor {
+    for (index, descriptor) in descriptors.iter().copied().enumerate() {
+        match descriptor.predictor {
             NONE_P => result.predictor_none_blocks += 1,
             DELTA => result.predictor_delta_blocks += 1,
             XOR => result.predictor_xor_blocks += 1,
             value => return Err(Error::UnsupportedMethod(value)),
         }
-        if method == REFERENCE {
-            if input[5] & 2 == 0 || predictor != NONE_P || packed != 4 {
-                return Err(Error::InvalidMatch);
-            }
-            let target = u32::from_le_bytes(input[cursor..end].try_into().unwrap()) as usize;
-            if target >= originals.len() || originals[target] != original {
-                return Err(Error::InvalidMatch);
-            }
+        if descriptor.method == REFERENCE {
+            reference_target(&descriptors, index)?;
             result.reference_blocks += 1;
-            result.referenced_bytes += original as u64;
-        } else if method == STORED {
+            result.referenced_bytes += descriptor.original as u64;
+            continue;
+        }
+        if descriptor.method == STORED {
+            if descriptor.predictor != NONE_P || descriptor.payload.len() != descriptor.original {
+                return Err(Error::InvalidMatch);
+            }
             result.stored_blocks += 1;
             result.literal_commands += 1;
-            result.literal_bytes += original as u64;
-        } else if matches!(method, PULSE | PULSE_HUFFMAN | PULSE_SPLIT) {
-            result.pulse_blocks += 1;
-            if method == PULSE_SPLIT {
-                result.split_pulse_blocks += 1;
-            }
-            if matches!(method, PULSE_HUFFMAN | PULSE_SPLIT) {
-                result.entropy_blocks += 1;
-            }
-            let decoded_entropy;
-            let decoded_split;
-            let payload = if method == PULSE_HUFFMAN {
-                decoded_entropy =
-                    huffman::decode_limited(&input[cursor..end], pulse_limit(original))?;
-                decoded_entropy.as_slice()
-            } else if method == PULSE_SPLIT {
-                decoded_split = split_expand(&input[cursor..end], original)?;
-                decoded_split.as_slice()
-            } else {
-                &input[cursor..end]
-            };
-            let mut at = 0;
-            let mut produced = 0usize;
-            while produced < original {
-                let tag = *payload.get(at).ok_or(Error::Truncated)?;
-                at += 1;
-                if tag < 0x80 {
-                    let length = tag as usize + 1;
-                    if at + length > payload.len() || produced + length > original {
-                        return Err(Error::Truncated);
-                    }
-                    result.literal_commands += 1;
-                    result.literal_bytes += length as u64;
-                    at += length;
-                    produced += length;
-                } else {
-                    let length = if tag < 0xc0 {
-                        result.short_match_commands += 1;
-                        (tag as usize & 0x3f) + 4
-                    } else if tag == 0xc0 {
-                        result.long_match_commands += 1;
-                        get_var(payload, &mut at)? as usize
-                    } else {
-                        return Err(Error::InvalidMatch);
-                    };
-                    if produced + length > original {
-                        return Err(Error::InvalidMatch);
-                    }
-                    if at + 2 > payload.len() {
-                        return Err(Error::InvalidMatch);
-                    }
-                    let distance = u16::from_le_bytes([payload[at], payload[at + 1]]) as usize;
-                    at += 2;
-                    if distance == 0 || distance > produced {
-                        return Err(Error::InvalidMatch);
-                    }
-                    result.matched_bytes += length as u64;
-                    result.distance_total += distance as u64;
-                    produced += length;
-                }
-            }
-            if at != payload.len() {
-                return Err(Error::TrailingData);
-            }
-        } else {
-            return Err(Error::UnsupportedMethod(method));
+            result.literal_bytes += descriptor.original as u64;
+            continue;
         }
-        originals.push(original);
-        cursor = end;
+        if !matches!(descriptor.method, PULSE | PULSE_HUFFMAN | PULSE_SPLIT) {
+            return Err(Error::UnsupportedMethod(descriptor.method));
+        }
+
+        result.pulse_blocks += 1;
+        if descriptor.method == PULSE_SPLIT {
+            result.split_pulse_blocks += 1;
+        }
+        if matches!(descriptor.method, PULSE_HUFFMAN | PULSE_SPLIT) {
+            result.entropy_blocks += 1;
+        }
+        let decoded_entropy;
+        let decoded_split;
+        let payload = if descriptor.method == PULSE_HUFFMAN {
+            decoded_entropy =
+                huffman::decode_limited(descriptor.payload, pulse_limit(descriptor.original))?;
+            decoded_entropy.as_slice()
+        } else if descriptor.method == PULSE_SPLIT {
+            decoded_split = split_expand(descriptor.payload, descriptor.original)?;
+            decoded_split.as_slice()
+        } else {
+            descriptor.payload
+        };
+        let mut at = 0usize;
+        let mut produced = 0usize;
+        while produced < descriptor.original {
+            let tag = *payload.get(at).ok_or(Error::Truncated)?;
+            at += 1;
+            if tag < 0x80 {
+                let length = tag as usize + 1;
+                let end = at.checked_add(length).ok_or(Error::InputTooLarge)?;
+                if end > payload.len() || produced.saturating_add(length) > descriptor.original {
+                    return Err(Error::Truncated);
+                }
+                result.literal_commands += 1;
+                result.literal_bytes += length as u64;
+                at = end;
+                produced += length;
+                continue;
+            }
+            let length = if tag < 0xc0 {
+                result.short_match_commands += 1;
+                (tag as usize & 0x3f) + 4
+            } else if tag == 0xc0 {
+                result.long_match_commands += 1;
+                get_var(payload, &mut at)? as usize
+            } else {
+                return Err(Error::InvalidMatch);
+            };
+            if length < MIN_M || produced.saturating_add(length) > descriptor.original {
+                return Err(Error::InvalidMatch);
+            }
+            let distance_end = at.checked_add(2).ok_or(Error::InputTooLarge)?;
+            if distance_end > payload.len() {
+                return Err(Error::InvalidMatch);
+            }
+            let distance = u16::from_le_bytes([payload[at], payload[at + 1]]) as usize;
+            at = distance_end;
+            if distance == 0 || distance > produced {
+                return Err(Error::InvalidMatch);
+            }
+            result.matched_bytes += length as u64;
+            result.distance_total += distance as u64;
+            produced += length;
+        }
+        if at != payload.len() {
+            return Err(Error::TrailingData);
+        }
     }
     Ok(result)
 }
+
 pub fn frame_info(input: &[u8]) -> Result<FrameInfo, Error> {
-    let (descriptors, _, original_size) = parse_frame(input, usize::MAX)?;
+    frame_info_with_limit(input, usize::MAX)
+}
+
+pub fn frame_info_with_limit(input: &[u8], limit: usize) -> Result<FrameInfo, Error> {
+    let (descriptors, _, original_size) = parse_frame(input, limit)?;
     for (index, descriptor) in descriptors.iter().enumerate() {
         if descriptor.method == REFERENCE {
             reference_target(&descriptors, index)?;
@@ -1219,7 +1254,7 @@ fn match_token(o: &mut Vec<u8>, d: usize, l: usize) {
     o.extend_from_slice(&(d as u16).to_le_bytes())
 }
 fn decode(i: &[u8], expected: usize, _pulse_v2: bool) -> Result<Vec<u8>, Error> {
-    let mut o = Vec::with_capacity(expected);
+    let mut o = try_with_capacity(expected)?;
     let mut p = 0;
     while o.len() < expected {
         let tag = *i.get(p).ok_or(Error::Truncated)?;
@@ -1340,15 +1375,16 @@ fn split_expand(input: &[u8], expected: usize) -> Result<Vec<u8>, Error> {
         return Err(Error::InvalidEntropyData);
     }
     let mut position = 4usize;
-    let tags = read_split_stream(input, &mut position, expected)?;
-    let literals_stream = read_split_stream(input, &mut position, expected)?;
-    let lengths = read_split_stream(input, &mut position, expected)?;
-    let distances_stream = read_split_stream(input, &mut position, expected)?;
+    let mut split_budget = split_stream_limit(expected);
+    let tags = read_split_stream(input, &mut position, &mut split_budget)?;
+    let literals_stream = read_split_stream(input, &mut position, &mut split_budget)?;
+    let lengths = read_split_stream(input, &mut position, &mut split_budget)?;
+    let distances_stream = read_split_stream(input, &mut position, &mut split_budget)?;
     if position != input.len() {
         return Err(Error::TrailingData);
     }
 
-    let mut pulse = Vec::new();
+    let mut pulse = try_with_capacity(pulse_limit(expected))?;
     let mut tag_position = 0usize;
     let mut literal_position = 0usize;
     let mut length_position = 0usize;
@@ -1403,15 +1439,16 @@ fn split_decode(input: &[u8], expected: usize) -> Result<Vec<u8>, Error> {
         return Err(Error::InvalidEntropyData);
     }
     let mut position = 4usize;
-    let tags = read_split_stream(input, &mut position, expected)?;
-    let literals_stream = read_split_stream(input, &mut position, expected)?;
-    let lengths = read_split_stream(input, &mut position, expected)?;
-    let distances_stream = read_split_stream(input, &mut position, expected)?;
+    let mut split_budget = split_stream_limit(expected);
+    let tags = read_split_stream(input, &mut position, &mut split_budget)?;
+    let literals_stream = read_split_stream(input, &mut position, &mut split_budget)?;
+    let lengths = read_split_stream(input, &mut position, &mut split_budget)?;
+    let distances_stream = read_split_stream(input, &mut position, &mut split_budget)?;
     if position != input.len() {
         return Err(Error::TrailingData);
     }
 
-    let mut output = Vec::with_capacity(expected);
+    let mut output = try_with_capacity(expected)?;
     let mut tag_position = 0usize;
     let mut literal_position = 0usize;
     let mut length_position = 0usize;
@@ -1463,7 +1500,11 @@ fn split_decode(input: &[u8], expected: usize) -> Result<Vec<u8>, Error> {
     }
     Ok(output)
 }
-fn read_split_stream(input: &[u8], position: &mut usize, limit: usize) -> Result<Vec<u8>, Error> {
+fn read_split_stream(
+    input: &[u8],
+    position: &mut usize,
+    remaining: &mut usize,
+) -> Result<Vec<u8>, Error> {
     let method = *input.get(*position).ok_or(Error::Truncated)?;
     *position += 1;
     let end_header = position.checked_add(4).ok_or(Error::InputTooLarge)?;
@@ -1473,11 +1514,25 @@ fn read_split_stream(input: &[u8], position: &mut usize, limit: usize) -> Result
     let end = position.checked_add(size).ok_or(Error::InputTooLarge)?;
     let payload = input.get(*position..end).ok_or(Error::Truncated)?;
     *position = end;
-    match method {
-        0 => Ok(payload.to_vec()),
-        1 => huffman::decode_limited(payload, limit),
-        _ => Err(Error::InvalidEntropyData),
-    }
+    let decoded = match method {
+        0 => {
+            if payload.len() > *remaining {
+                return Err(Error::OutputLimitExceeded {
+                    requested: payload.len(),
+                    limit: *remaining,
+                });
+            }
+            try_copy(payload)?
+        }
+        1 => huffman::decode_limited(payload, *remaining)?,
+        _ => return Err(Error::InvalidEntropyData),
+    };
+    *remaining -= decoded.len();
+    Ok(decoded)
+}
+
+fn split_stream_limit(expected: usize) -> usize {
+    pulse_limit(expected).saturating_add(expected.div_ceil(MIN_M))
 }
 fn pulse_limit(expected: usize) -> usize {
     expected
@@ -1492,39 +1547,52 @@ fn put_var(o: &mut Vec<u8>, mut v: u32) {
     o.push(v as u8)
 }
 fn get_var(i: &[u8], p: &mut usize) -> Result<u32, Error> {
-    let (mut v, mut shift) = (0, 0);
-    loop {
-        let b = *i.get(*p).ok_or(Error::Truncated)?;
-        *p += 1;
-        if shift >= 32 {
-            return Err(Error::InvalidMatch);
-        }
-        v |= ((b & 0x7f) as u32) << shift;
-        if b & 0x80 == 0 {
-            return Ok(v);
-        }
-        shift += 7
-    }
-}
-fn get_var_first(i: &[u8], p: &mut usize, first: u8) -> Result<u32, Error> {
-    let mut value = (first & 0x7f) as u32;
-    if first & 0x80 == 0 {
-        return Ok(value);
-    }
-    let mut shift = 7;
+    let (mut value, mut shift) = (0u32, 0u32);
     loop {
         let byte = *i.get(*p).ok_or(Error::Truncated)?;
         *p += 1;
-        if shift >= 32 {
+        if shift == 28 && byte & 0xf0 != 0 {
             return Err(Error::InvalidMatch);
         }
-        value |= ((byte & 0x7f) as u32) << shift;
+        value |= u32::from(byte & 0x7f) << shift;
         if byte & 0x80 == 0 {
+            if shift != 0 && byte == 0 {
+                return Err(Error::InvalidMatch);
+            }
             return Ok(value);
+        }
+        if shift == 28 {
+            return Err(Error::InvalidMatch);
         }
         shift += 7;
     }
 }
+fn get_var_first(i: &[u8], p: &mut usize, first: u8) -> Result<u32, Error> {
+    let mut value = u32::from(first & 0x7f);
+    if first & 0x80 == 0 {
+        return Ok(value);
+    }
+    let mut shift = 7u32;
+    loop {
+        let byte = *i.get(*p).ok_or(Error::Truncated)?;
+        *p += 1;
+        if shift == 28 && byte & 0xf0 != 0 {
+            return Err(Error::InvalidMatch);
+        }
+        value |= u32::from(byte & 0x7f) << shift;
+        if byte & 0x80 == 0 {
+            if byte == 0 {
+                return Err(Error::InvalidMatch);
+            }
+            return Ok(value);
+        }
+        if shift == 28 {
+            return Err(Error::InvalidMatch);
+        }
+        shift += 7;
+    }
+}
+
 fn valid(o: CompressionOptions) -> Result<(), Error> {
     if !(MIN_BLOCK..=MAX_BLOCK).contains(&o.block_size) {
         return Err(Error::InvalidBlockSize(o.block_size));
@@ -1722,6 +1790,10 @@ mod tests {
                     decompress_slice(&archive, data.len()),
                     Err(Error::ChecksumMismatch { .. })
                 ));
+                assert!(matches!(
+                    analyze_archive(&archive),
+                    Err(Error::ChecksumMismatch { .. })
+                ));
                 break;
             }
             assert_ne!(method, END);
@@ -1784,6 +1856,77 @@ mod tests {
             let archive = compress_slice(&data).unwrap();
             assert_eq!(decompress_slice(&archive, data.len()).unwrap(), data);
         }
+    }
+
+    #[test]
+    fn rejects_noncanonical_and_overflowing_varints() {
+        let mut position = 0;
+        assert!(matches!(
+            get_var(&[0x80, 0x00], &mut position),
+            Err(Error::InvalidMatch)
+        ));
+        position = 0;
+        assert!(matches!(
+            get_var(&[0xff, 0xff, 0xff, 0xff, 0x1f], &mut position),
+            Err(Error::InvalidMatch)
+        ));
+        position = 0;
+        assert!(matches!(
+            get_var_first(&[0x00], &mut position, 0x80),
+            Err(Error::InvalidMatch)
+        ));
+    }
+
+    #[test]
+    fn split_streams_share_one_decode_budget() {
+        let mut split = b"SPL1".to_vec();
+        for _ in 0..4 {
+            split.push(0);
+            split.extend_from_slice(&300u32.to_le_bytes());
+            split.extend_from_slice(&[0; 300]);
+        }
+        assert!(matches!(
+            split_decode(&split, 8),
+            Err(Error::OutputLimitExceeded { .. })
+        ));
+    }
+
+    #[test]
+    fn allocation_capacity_overflow_is_reported() {
+        assert!(matches!(
+            try_with_capacity::<u8>(usize::MAX),
+            Err(Error::AllocationFailed { .. })
+        ));
+    }
+
+    #[test]
+    fn analyze_rejects_invalid_stored_predictor() {
+        let data: Vec<u8> = (0..32).collect();
+        let mut archive = compress_slice(&data).unwrap();
+        assert_eq!(archive[HEADER], STORED);
+        archive[HEADER + 1] = DELTA;
+        assert!(frame_info(&archive).is_err());
+        assert!(analyze_archive(&archive).is_err());
+    }
+
+    #[test]
+    fn stream_limit_uses_decoded_bytes() {
+        let data = vec![0x42; MIN_BLOCK * 2];
+        let mut archive = Vec::new();
+        compress_stream(
+            &mut data.as_slice(),
+            &mut archive,
+            CompressionOptions {
+                block_size: MIN_BLOCK,
+            },
+        )
+        .unwrap();
+        let mut output = Vec::new();
+        assert!(matches!(
+            decompress_stream(&mut archive.as_slice(), &mut output, MIN_BLOCK),
+            Err(Error::OutputLimitExceeded { .. })
+        ));
+        assert_eq!(output.len(), MIN_BLOCK);
     }
 
     #[test]

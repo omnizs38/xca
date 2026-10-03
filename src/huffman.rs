@@ -12,6 +12,16 @@ struct TreeNode {
     symbol: Option<u8>,
 }
 
+fn try_output(capacity: usize) -> Result<Vec<u8>, Error> {
+    let mut output = Vec::new();
+    output
+        .try_reserve_exact(capacity)
+        .map_err(|_| Error::AllocationFailed {
+            requested: capacity,
+        })?;
+    Ok(output)
+}
+
 pub(crate) fn encode(input: &[u8]) -> Option<Vec<u8>> {
     if input.is_empty() || input.len() > u32::MAX as usize {
         return None;
@@ -125,7 +135,7 @@ pub(crate) fn decode_limited(input: &[u8], limit: usize) -> Result<Vec<u8>, Erro
     let mut position = 0usize;
     let mut bits = 0u8;
     let mut buffer = 0u64;
-    let mut output = Vec::with_capacity(expected);
+    let mut output = try_output(expected)?;
     while output.len() < expected {
         while bits < TABLE_BITS && position < payload.len() {
             buffer = (buffer << 8) | payload[position] as u64;
