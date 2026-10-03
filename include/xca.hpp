@@ -3,7 +3,6 @@
 
 #include "xca.h"
 #include <cstdint>
-#include <limits>
 #include <stdexcept>
 #include <string>
 #include <vector>
@@ -31,7 +30,8 @@ inline std::vector<std::uint8_t> decompress(
     std::size_t size,
     std::size_t max_output_size = 256U * 1024U * 1024U) {
     std::size_t output_size = 0;
-    auto code = xca_decompressed_size(data, size, &output_size);
+    auto code = xca_decompressed_size_with_limit(
+        data, size, max_output_size, &output_size);
     if (code != 0) throw std::runtime_error(xca_error_string(code));
     if (output_size > max_output_size) {
         throw std::length_error("decoded output exceeds the configured limit");

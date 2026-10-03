@@ -6,8 +6,8 @@ mod huffman;
 mod v4;
 pub(crate) use codec::crc32;
 pub use v4::{
-    analyze_archive, compress_stream, decompress_stream, set_thread_limit, ArchiveAnalysis,
-    CompressionOptions, StreamStats,
+    analyze_archive, compress_stream, decompress_stream, decompress_stream_exact, set_thread_limit,
+    ArchiveAnalysis, CompressionOptions, StreamStats,
 };
 pub const DEFAULT_OUTPUT_LIMIT: usize = 1 << 30;
 pub const VERSION: &str = env!("CARGO_PKG_VERSION");
@@ -75,6 +75,7 @@ pub enum Error {
     InputTooLarge,
     WorkerPanicked,
     StreamingReferencesUnsupported,
+    AllocationFailed { requested: usize },
 }
 impl fmt::Display for Error {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -106,6 +107,9 @@ impl fmt::Display for Error {
             Self::WorkerPanicked => write!(f, "XCA worker thread panicked"),
             Self::StreamingReferencesUnsupported => {
                 write!(f, "streaming decode does not support long-range references")
+            }
+            Self::AllocationFailed { requested } => {
+                write!(f, "could not allocate {requested} bytes")
             }
         }
     }
@@ -170,8 +174,26 @@ pub fn decompress_into_with_options(
 pub fn frame_info(input: &[u8]) -> Result<FrameInfo, Error> {
     v4::frame_info(input)
 }
+pub fn frame_info_with_limit(input: &[u8], limit: usize) -> Result<FrameInfo, Error> {
+    v4::frame_info_with_limit(input, limit)
+}
 pub fn check(input: &[u8]) -> Result<usize, Error> {
-    v4::verify_slice(input, DEFAULT_OUTPUT_LIMIT)
+    check_with_limit(input, DEFAULT_OUTPUT_LIMIT)
+}
+pub fn check_with_limit(input: &[u8], limit: usize) -> Result<usize, Error> {
+    v4::verify_slice(input, limit)
+}
+pub fn frame_info_file(path: impl AsRef<Path>) -> Result<FrameInfo, Error> {
+    let input = file_io::ReadMap::open(path.as_ref())?;
+    frame_info(input.as_slice())
+}
+pub fn check_file(path: impl AsRef<Path>) -> Result<usize, Error> {
+    let input = file_io::ReadMap::open(path.as_ref())?;
+    check(input.as_slice())
+}
+pub fn analyze_file(path: impl AsRef<Path>) -> Result<ArchiveAnalysis, Error> {
+    let input = file_io::ReadMap::open(path.as_ref())?;
+    analyze_archive(input.as_slice())
 }
 pub fn compress_file(
     input_path: impl AsRef<Path>,
@@ -211,13 +233,7 @@ pub fn decompress_file_with_limit(
         ));
     }
     let input = file_io::ReadMap::open(input_path)?;
-    let output_len = frame_info(input.as_slice())?.original_size;
-    if output_len > limit {
-        return Err(Error::OutputLimitExceeded {
-            requested: output_len,
-            limit,
-        });
-    }
+    let output_len = frame_info_with_limit(input.as_slice(), limit)?.original_size;
     let mut output = file_io::AtomicWriteMap::create(output_path, output_len)?;
     decompress_into_with_limit(input.as_slice(), output.as_mut_slice(), limit)?;
     output.commit()?;
@@ -288,6 +304,18 @@ mod tests {
         let compressed = compress_file(&source, &archive).unwrap();
         let decompressed = decompress_file(&archive, &restored).unwrap();
 
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(
+                fs::metadata(&archive).unwrap().permissions().mode() & 0o077,
+                0
+            );
+            assert_eq!(
+                fs::metadata(&restored).unwrap().permissions().mode() & 0o077,
+                0
+            );
+        }
         assert_eq!(compressed.input_bytes, data.len() as u64);
         assert_eq!(decompressed.output_bytes, data.len() as u64);
         assert_eq!(fs::read(&restored).unwrap(), data);

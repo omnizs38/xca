@@ -29,7 +29,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
                 "{} -> {} bytes ({:.2}%)",
                 stats.input_bytes,
                 stats.output_bytes,
-                ratio(stats.input_bytes as usize, stats.output_bytes as usize)
+                ratio(stats.input_bytes, stats.output_bytes)
             );
         }
         Some("decompress") if args.len() == 4 => {
@@ -37,13 +37,11 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             eprintln!("{} -> {} bytes", stats.input_bytes, stats.output_bytes);
         }
         Some("check") if args.len() == 3 => {
-            let input = fs::read(&args[2])?;
-            let decoded_size = xca::check(&input)?;
+            let decoded_size = xca::check_file(&args[2])?;
             eprintln!("valid XCA stream; decoded size: {decoded_size} bytes");
         }
         Some("info") if args.len() == 3 => {
-            let input = fs::read(&args[2])?;
-            let info = xca::frame_info(&input)?;
+            let info = xca::frame_info_file(&args[2])?;
             println!("version: XCA{}", info.version);
             println!("method: {:?}", info.method);
             if let Some(level) = info.legacy_level {
@@ -57,8 +55,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
             println!("checksum: {}", info.checksum);
         }
         Some("analyze") if args.len() == 3 => {
-            let archive = fs::read(&args[2])?;
-            let a = xca::analyze_archive(&archive)?;
+            let a = xca::analyze_file(&args[2])?;
             let match_commands = a.short_match_commands + a.long_match_commands;
             println!("original_bytes: {}", a.original_bytes);
             println!("archive_bytes: {}", a.archive_bytes);
@@ -144,7 +141,7 @@ fn run() -> Result<(), Box<dyn std::error::Error>> {
     Ok(())
 }
 
-fn ratio(input: usize, output: usize) -> f64 {
+fn ratio(input: u64, output: u64) -> f64 {
     if input == 0 {
         0.0
     } else {

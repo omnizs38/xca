@@ -31,3 +31,4 @@ jobs:
           fi
       - run: cargo fuzz run decompress -- -max_total_time=$FUZZ_SECONDS -max_len=1048576
       - run: cargo fuzz run round_trip -- -max_total_time=$FUZZ_SECONDS -max_len=2097152
+      - run: cargo fuzz run mutate_archive -- -max_total_time=$FUZZ_SECONDS -max_len=1048576

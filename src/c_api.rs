@@ -1,5 +1,5 @@
 use super::{
-    decompress_into_with_limit, decompress_with_limit, frame_info, try_compress, Error,
+    decompress_into_with_limit, decompress_with_limit, frame_info_with_limit, try_compress, Error,
     DEFAULT_OUTPUT_LIMIT,
 };
 use std::{ffi::c_char, ptr, slice};
@@ -24,6 +24,7 @@ pub extern "C" fn xca_error_string(code: i32) -> *const c_char {
         3 => b"invalid or corrupted XCA input\0",
         4 => b"decoded output exceeds the configured limit\0",
         5 => b"internal XCA worker failure\0",
+        6 => b"memory allocation failed\0",
         _ => b"unknown XCA error\0",
     };
     message.as_ptr().cast()
@@ -41,6 +42,10 @@ fn input_slice<'a>(data: *const u8, len: usize) -> Option<&'a [u8]> {
 }
 
 fn return_buffer(bytes: Vec<u8>, output: *mut XcaBuffer) -> i32 {
+    if bytes.is_empty() {
+        clear_buffer(output);
+        return 0;
+    }
     let boxed = bytes.into_boxed_slice();
     let len = boxed.len();
     let data = Box::into_raw(boxed).cast::<u8>();
@@ -82,6 +87,7 @@ pub unsafe extern "C" fn xca_compress(data: *const u8, len: usize, output: *mut 
     match try_compress(input) {
         Ok(bytes) => return_buffer(bytes, output),
         Err(Error::WorkerPanicked) => 5,
+        Err(Error::AllocationFailed { .. }) => 6,
         Err(_) => 3,
     }
 }
@@ -114,6 +120,7 @@ pub unsafe extern "C" fn xca_decompress_with_limit(
         Ok(bytes) => return_buffer(bytes, output),
         Err(Error::OutputLimitExceeded { .. }) => 4,
         Err(Error::WorkerPanicked) => 5,
+        Err(Error::AllocationFailed { .. }) => 6,
         Err(_) => 3,
     }
 }
@@ -131,15 +138,16 @@ pub unsafe extern "C" fn xca_decompress(
     unsafe { xca_decompress_with_limit(data, len, DEFAULT_OUTPUT_LIMIT, output) }
 }
 
-/// Returns the exact decoded size required by `xca_decompress_into`.
+/// Returns the exact decoded size, enforcing `max_output` while parsing.
 ///
 /// # Safety
 /// `data` must reference `len` readable bytes when `len` is non-zero, and
 /// `output_len` must point to writable `size_t` storage.
 #[no_mangle]
-pub unsafe extern "C" fn xca_decompressed_size(
+pub unsafe extern "C" fn xca_decompressed_size_with_limit(
     data: *const u8,
     len: usize,
+    max_output: usize,
     output_len: *mut usize,
 ) -> i32 {
     if output_len.is_null() {
@@ -150,14 +158,29 @@ pub unsafe extern "C" fn xca_decompressed_size(
     let Some(input) = input_slice(data, len) else {
         return 1;
     };
-    match frame_info(input) {
+    match frame_info_with_limit(input, max_output) {
         Ok(info) => {
             // SAFETY: output_len was checked and the caller guarantees writability.
             unsafe { output_len.write(info.original_size) };
             0
         }
+        Err(Error::OutputLimitExceeded { .. }) => 4,
+        Err(Error::AllocationFailed { .. }) => 6,
         Err(_) => 3,
     }
+}
+
+/// Returns the exact decoded size using the library's default output limit.
+///
+/// # Safety
+/// The pointer requirements are identical to `xca_decompressed_size_with_limit`.
+#[no_mangle]
+pub unsafe extern "C" fn xca_decompressed_size(
+    data: *const u8,
+    len: usize,
+    output_len: *mut usize,
+) -> i32 {
+    unsafe { xca_decompressed_size_with_limit(data, len, DEFAULT_OUTPUT_LIMIT, output_len) }
 }
 
 /// Decompresses directly into caller-owned memory with an explicit limit.
@@ -193,6 +216,7 @@ pub unsafe extern "C" fn xca_decompress_into_with_limit(
         Err(Error::LengthMismatch { .. }) => 2,
         Err(Error::OutputLimitExceeded { .. }) => 4,
         Err(Error::WorkerPanicked) => 5,
+        Err(Error::AllocationFailed { .. }) => 6,
         Err(_) => 3,
     }
 }
@@ -276,6 +300,30 @@ mod tests {
         let code =
             unsafe { xca_decompressed_size(invalid.as_ptr(), invalid.len(), &mut output_len) };
         assert_eq!(code, 3);
+        assert_eq!(output_len, 0);
+    }
+
+    #[test]
+    fn empty_decompressed_buffer_is_null() {
+        let archive = crate::compress(&[]);
+        let mut output = XcaBuffer {
+            data: ptr::dangling_mut(),
+            len: usize::MAX,
+        };
+        let code = unsafe { xca_decompress(archive.as_ptr(), archive.len(), &mut output) };
+        assert_eq!(code, 0);
+        assert!(output.data.is_null());
+        assert_eq!(output.len, 0);
+    }
+
+    #[test]
+    fn decoded_size_limit_clears_output() {
+        let archive = crate::compress(b"bounded metadata");
+        let mut output_len = usize::MAX;
+        let code = unsafe {
+            xca_decompressed_size_with_limit(archive.as_ptr(), archive.len(), 1, &mut output_len)
+        };
+        assert_eq!(code, 4);
         assert_eq!(output_len, 0);
     }
 

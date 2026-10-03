@@ -24,3 +24,9 @@ path = "fuzz_targets/round_trip.rs"
 test = false
 doc = false
 bench = false
+[[bin]]
+name = "mutate_archive"
+path = "fuzz_targets/mutate_archive.rs"
+test = false
+doc = false
+bench = false

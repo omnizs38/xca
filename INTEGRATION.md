@@ -21,6 +21,9 @@ The file helpers memory-map inputs and decode directly into the destination file
 avoiding a second full-size output allocation and copy. Internal block and
 decoder workspaces may still allocate.
 
+
+For framed sockets or concatenated protocols, `decompress_stream` stops at the XCA terminator without waiting for the underlying reader to reach EOF. Use `decompress_stream_exact` for standalone files when trailing bytes must be rejected.
+
 ## Caller-owned output
 
 ```rust
@@ -58,10 +61,15 @@ High-throughput applications can avoid the library-owned decompression
 allocation and subsequent copy:
 
 ```c
+const size_t max_output = 256U * 1024U * 1024U;
 size_t restored_len = 0;
-xca_decompressed_size(archive, archive_len, &restored_len);
+int32_t code = xca_decompressed_size_with_limit(
+    archive, archive_len, max_output, &restored_len);
+if (code != 0) return code;
 uint8_t *restored = malloc(restored_len);
-xca_decompress_into(archive, archive_len, restored, restored_len);
+if (restored == NULL && restored_len != 0) return 6;
+return xca_decompress_into_with_limit(
+    archive, archive_len, restored, restored_len, max_output);
 ```
 
 ## C++
@@ -101,7 +109,11 @@ const char *xca_error_string(int32_t code);
 int32_t xca_compress(const uint8_t *, size_t, XcaBuffer *);
 int32_t xca_decompress(const uint8_t *, size_t, XcaBuffer *);
 int32_t xca_decompressed_size(const uint8_t *, size_t, size_t *);
+int32_t xca_decompressed_size_with_limit(
+    const uint8_t *, size_t, size_t, size_t *);
 int32_t xca_decompress_into(const uint8_t *, size_t, uint8_t *, size_t);
+int32_t xca_decompress_into_with_limit(
+    const uint8_t *, size_t, uint8_t *, size_t, size_t);
 void xca_buffer_free(XcaBuffer *);
 ```
 
@@ -119,4 +131,4 @@ The CLI returns a non-zero process status on failure and can be embedded in scri
 
 ## Compatibility
 
-XCA 0.14.0 writes XCA8. The decoder accepts XCA4 through XCA8. New applications should treat the format as experimental until a stable 1.0 specification is published.
+XCA 0.14.1 writes XCA8. The decoder accepts XCA4 through XCA8. New applications should treat the format as experimental until a stable 1.0 specification is published.
