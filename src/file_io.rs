@@ -133,8 +133,21 @@ fn create_temporary_file(destination: &Path) -> Result<(PathBuf, File), Error> {
             .open(&temporary_path)
         {
             Ok(file) => {
-                if let Ok(metadata) = fs::metadata(destination) {
-                    file.set_permissions(metadata.permissions()).map_err(ioe)?;
+                let permissions = match fs::metadata(destination) {
+                    Ok(metadata) => Some(metadata.permissions()),
+                    Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
+                    Err(error) => {
+                        drop(file);
+                        let _ = fs::remove_file(&temporary_path);
+                        return Err(ioe(error));
+                    }
+                };
+                if let Some(permissions) = permissions {
+                    if let Err(error) = file.set_permissions(permissions) {
+                        drop(file);
+                        let _ = fs::remove_file(&temporary_path);
+                        return Err(ioe(error));
+                    }
                 }
                 return Ok((temporary_path, file));
             }
@@ -286,7 +299,13 @@ mod platform {
     pub(super) fn replace_file(source: &Path, destination: &Path) -> io::Result<()> {
         fs::rename(source, destination)?;
         let parent = destination.parent().unwrap_or_else(|| Path::new("."));
-        File::open(parent)?.sync_all()
+        // The rename is the commit point and cannot be rolled back safely. A
+        // directory fsync improves crash durability where supported, but an
+        // unsupported post-commit sync must not report that replacement failed.
+        if let Ok(directory) = File::open(parent) {
+            let _ = directory.sync_all();
+        }
+        Ok(())
     }
 }
 

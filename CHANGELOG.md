@@ -12,6 +12,11 @@
 - Removed duplicate parsing from `check` and `analyze_archive`.
 - Made empty C outputs canonical `{NULL, 0}` and added allocation error code 6.
 - Switched CLI `check`, `info`, and `analyze` to memory-mapped file helpers and fixed 32-bit ratio accounting.
+- Converted scoped worker creation failures into I/O errors and joined every worker before reporting panic failures.
+- Made `analyze_archive` verify reconstructed CRCs instead of reporting statistics for corrupted payloads.
+- Bounded reconstructed Split Pulse size before every write.
+- Fixed temporary-file leaks on metadata/permission errors and prevented false failure reports after a successful Unix rename commit point.
+- Added checked arithmetic for long-running stream byte counters and removed redundant reference validation.
 - Added regression coverage for every corrected failure class, expanded fuzzing across metadata/check/analyze/stream APIs, and completed decoder/round-trip fuzz passes.
 - Added real C and Python ABI smoke tests to CI and fixed direct execution of the Python example.
 
